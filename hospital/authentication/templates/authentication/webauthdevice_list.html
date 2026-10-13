@@ -1,0 +1,125 @@
+{% extends "webauth/base.html" %}
+
+{% block title %}Security Keys{% endblock %}
+
+{% block content %}
+  <div class="row justify-content-md-center">
+    <div class="col col-lg-6">
+      <div class="card shadow bg-light">
+        <h4 class="card-header">Add a security key</h4>
+        <div class="row card-body">
+          <div class="col-auto">
+            <input id="device-name" type="text" class="form-control"
+                   placeholder="Nickname">
+          </div>
+          <div class="col-auto">
+            <button id="add-device" type="button" class="btn btn-primary">Add
+            </button>
+          </div>
+        </div>
+        <h4 class="card-header">Linked keys</h4>
+        <ul class="list-group list-group-flush">
+          {% for device in object_list %}
+            <li class="list-group-item d-flex justify-content-between">
+              {{ device.name }} - {{ device.created_at }}
+              <a class="text-danger text-decoration-none fs-6" href="{% url 'webauth:delete' pk=device.id %}">&#215;</a>
+            </li>
+          {% empty %}
+            <li class="list-group-item">No keys registered.</li>
+          {% endfor %}
+        </ul>
+      </div>
+    </div>
+  </div>
+  
+  <script>
+   // Registration function
+async function register_device() {
+    const username = "{{ request.user.username }}";
+
+    try {
+        const res = await fetch("{% url 'webauth:register_device' %}");
+        const args = await res.json();
+
+        args.publicKey.user.id = base64url_to_buffer(args.publicKey.user.id);
+        args.publicKey.challenge = base64url_to_buffer(args.publicKey.challenge);
+
+        const credential = await navigator.credentials.create(args);
+
+        const deviceName =
+            document.getElementById("device-name").value || "My Security Key";
+
+        await fetch("{% url 'webauth:register_device' %}", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "X-CSRFToken": getCookie("csrftoken"),
+            },
+            body: JSON.stringify({
+                name: deviceName,
+                pubKeyCredential: {
+                    id: credential.id,
+                    rawId: buffer_to_base64url(credential.rawId),
+                    response: {
+                        attestationObject: buffer_to_base64url(
+                            credential.response.attestationObject
+                        ),
+                        clientDataJSON: buffer_to_base64url(
+                            credential.response.clientDataJSON
+                        ),
+                    },
+                    type: credential.type,
+                },
+            }),
+        });
+
+        if (typeof securityLogger !== "undefined") {
+            securityLogger.setupDevice(
+                username,
+                deviceName,
+                credential.id,
+                {
+                    userAgent: navigator.userAgent,
+                    deviceKeyGenerated: true,
+                    keysEncryptedWithDeviceKey: true,
+                }
+            );
+        }
+
+        alert("User registered successfully!");
+        window.location.reload();
+    } catch (error) {
+        showErrors(["Registration failed: " + error.message]);
+    }
+}
+
+document
+    .getElementById("add-device")
+    .addEventListener("click", register_device);
+
+// Helper functions
+function base64url_to_buffer(base64url) {
+    const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes.buffer;
+}
+
+function buffer_to_base64url(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+
+function getCookie(name) {
+    const cookies = document.cookie.split(';').map(c => c.trim());
+    for (const cookie of cookies) {
+        if (cookie.startsWith(name + '=')) return decodeURIComponent(cookie.slice(name.length + 1));
+    }
+    return null;
+}
+</script>
+
+{% endblock %}

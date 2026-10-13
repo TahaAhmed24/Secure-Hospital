@@ -1,0 +1,161 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}Setup Encryption Keys{% endblock %}
+
+{% block content %}
+<script src="{% static 'crypto.js' %}"></script>
+
+<div class="container py-5">
+  <div class="row justify-content-center">
+    <div class="col-md-8">
+      <div class="card shadow">
+        <div class="card-header bg-primary text-white">
+          <h3 class="mb-0">Setup Your Encryption Keys</h3>
+        </div>
+        <div class="card-body">
+          <div id="step-1" class="setup-step">
+            <h5 class="card-title">Step 1: Save Your Recovery String</h5>
+            <div class="alert alert-warning">
+              <strong>Important!</strong> This recovery string is the ONLY way to recover your encrypted data if you lose access to all your devices. Store it securely.
+            </div>
+            <div class="card bg-light p-3 mb-3">
+              <p class="mb-2"><strong>Your Recovery String:</strong></p>
+              <p id="recovery-string" class="font-monospace fs-5 text-break"></p>
+              <button class="btn btn-sm btn-secondary" id="copy-button">
+                <i class="bi bi-clipboard"></i> Copy to Clipboard
+              </button>
+            </div>
+            <div class="form-check mb-3">
+              <input class="form-check-input" type="checkbox" id="confirm-saved">
+              <label class="form-check-label" for="confirm-saved">
+                I have securely saved this recovery string and understand that I cannot recover my data without it
+              </label>
+            </div>
+            <button class="btn btn-primary" id="continue-button" disabled>
+              Continue to Key Generation
+            </button>
+          </div>
+
+          <div id="step-2" class="setup-step d-none">
+            <h5 class="card-title">Step 2: Generating Your Encryption Keys</h5>
+            <div class="text-center py-4">
+              <div class="spinner-border text-primary mb-3" role="status">
+                <span class="visually-hidden">Loading...</span>
+              </div>
+              <p>Generating your encryption and signing keys...</p>
+              <small class="text-muted">This may take a few seconds</small>
+            </div>
+          </div>
+
+          <div id="step-error" class="setup-step d-none">
+            <div class="alert alert-danger">
+              <h5>Setup Failed</h5>
+              <p id="error-message"></p>
+              <button class="btn btn-danger" onclick="location.reload()">Try Again</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+  let recoveryString = "";
+  const username = "{{ request.user.username }}";
+
+  function init() {
+    recoveryString = E2EESession.generateRecoveryString();
+    document.getElementById("recovery-string").innerText = recoveryString;
+  }
+
+  document.getElementById("copy-button").addEventListener("click", async function() {
+    try {
+      await navigator.clipboard.writeText(recoveryString);
+      this.innerHTML = '<i class="bi bi-check"></i> Copied!';
+      setTimeout(() => {
+        this.innerHTML = '<i class="bi bi-clipboard"></i> Copy to Clipboard';
+      }, 2000);
+    } catch (err) {
+      alert("Failed to copy to clipboard");
+    }
+  });
+
+  document.getElementById("confirm-saved").addEventListener("change", function() {
+    document.getElementById("continue-button").disabled = !this.checked;
+  });
+
+  document.getElementById("continue-button").addEventListener("click", async function() {
+    document.getElementById("step-1").classList.add("d-none");
+    document.getElementById("step-2").classList.remove("d-none");
+
+    try {
+      const encKeyPair = await E2EECrypto.generateEncryptionKeyPair();
+      const signKeyPair = await E2EECrypto.generateSigningKeyPair();
+
+      const { salt: encSalt, encryptedKey: encPriv } =
+        await E2EECrypto.encryptPrivateKey(
+          encKeyPair.privateKey,
+          recoveryString
+        );
+
+      const { salt: signSalt, encryptedKey: signPriv } =
+        await E2EECrypto.encryptPrivateKey(
+          signKeyPair.privateKey,
+          recoveryString
+        );
+
+      const encPubPem = await E2EECrypto.exportPublicKey(encKeyPair.publicKey);
+      const signPubPem = await E2EECrypto.exportPublicKey(signKeyPair.publicKey);
+
+      const response = await loggedFetch('/records/api/keys/setup/', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRFToken': getCsrfToken()
+        },
+        body: JSON.stringify({
+          enc_public_key: encPubPem,
+          enc_encrypted_private_key: encPriv,
+          enc_salt: encSalt,
+          sign_public_key: signPubPem,
+          sign_encrypted_private_key: signPriv,
+          sign_salt: signSalt
+        })
+      }, {
+        logger: securityLogger,
+        action: 'setupUserKeys',
+        username: username,
+        data: {
+          encryptionKeysGenerated: true,
+          signatureKeysGenerated: true
+        },
+        logOnSuccess: true,
+        logOnError: true
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to setup keys');
+      }
+
+      sessionStorage.setItem('recovery_string_temp', recoveryString);
+      window.location.href = '/setup/device/';
+
+    } catch (error) {
+      document.getElementById("step-2").classList.add("d-none");
+      document.getElementById("step-error").classList.remove("d-none");
+      document.getElementById("error-message").innerText = error.message;
+    }
+  });
+
+  function getCsrfToken() {
+    return document.querySelector('[name=csrfmiddlewaretoken]')?.value || '';
+  }
+
+  init();
+});
+</script>
+{% endblock %}

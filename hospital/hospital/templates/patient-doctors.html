@@ -1,0 +1,415 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}My Doctors{% endblock %}
+
+{% block content %}
+<!-- E2EE and File Operations Scripts -->
+<script src="{% static 'crypto.js' %}"></script>
+<script src="{% static 'fileOperations.js' %}"></script>
+<script src="{% static 'session.js' %}"></script>
+<div class="container py-5">
+  <div class="row">
+    <div class="col-md-12">
+      <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2>Manage My Doctors</h2>
+        <a href="/private/" class="btn btn-secondary">Back to Dashboard</a>
+      </div>
+
+      <!-- Pending Requests from Doctors -->
+      <div class="card mb-4">
+        <div class="card-header bg-warning text-dark">
+          <h5 class="mb-0">Pending Appointment Requests</h5>
+        </div>
+        <div class="card-body" id="pending-requests-section">
+          <div id="pending-requests-loading" class="text-center py-3">
+            <div class="spinner-border spinner-border-sm text-primary" role="status">
+              <span class="visually-hidden">Loading...</span>
+            </div>
+            Loading requests...
+          </div>
+          <div id="pending-requests-container"></div>
+          <div id="no-pending-requests" class="text-muted d-none">No pending requests</div>
+        </div>
+      </div>
+
+      <!-- My Current Doctors -->
+      <div class="card mb-4">
+        <div class="card-header bg-success text-white">
+          <h5 class="mb-0">My Current Doctors</h5>
+        </div>
+        <div class="card-body">
+          <div id="current-doctors-loading" class="text-center py-3">
+            <div class="spinner-border spinner-border-sm text-primary" role="status">
+              <span class="visually-hidden">Loading...</span>
+            </div>
+            Loading your doctors...
+          </div>
+          <div id="current-doctors-container"></div>
+          <div id="no-current-doctors" class="text-muted d-none">No doctors appointed yet</div>
+        </div>
+      </div>
+
+      <!-- Available Doctors -->
+      <div class="card">
+        <div class="card-header bg-primary text-white">
+          <h5 class="mb-0">Available Doctors</h5>
+        </div>
+        <div class="card-body">
+          <div id="available-doctors-loading" class="text-center py-3">
+            <div class="spinner-border spinner-border-sm text-primary" role="status">
+              <span class="visually-hidden">Loading...</span>
+            </div>
+            Loading available doctors...
+          </div>
+          <div id="available-doctors-container"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+    const patientUsername = "{{request.user.username}}"
+    let pendingRequests = [];
+    let currentDoctors = [];
+    let availableDoctors = [];
+
+  /**
+   * Load data from three separate endpoints:
+   * 1. Current/appointed doctors
+   * 2. Doctors with pending appointment requests
+   * 3. Available doctors (not appointed, no pending requests)
+   */
+  async function loadData() {
+    try {
+      // Fetch current doctors
+      const currentResponse = await fetch('/appointments/api/doctors/appointed/');
+      if (!currentResponse.ok) throw new Error('Failed to load current doctors');
+      const currentData = await currentResponse.json();
+      currentDoctors = currentData.doctors;
+
+      // Fetch pending requests from doctors
+      const pendingResponse = await fetch('/appointments/api/doctors/pending/');
+      if (!pendingResponse.ok) throw new Error('Failed to load pending requests');
+      const pendingData = await pendingResponse.json();
+      pendingRequests = pendingData.doctors;
+
+      // Fetch available doctors (log browsing action)
+      const availableResponse = await loggedFetch('/appointments/api/doctors/available/', {}, {
+        logger: standardLogger,
+        action: 'browseDoctorsList',
+        username: patientUsername,
+        logOnSuccess: true,
+        logOnError: true
+      });
+      if (!availableResponse.ok) throw new Error('Failed to load available doctors');
+      const availableData = await availableResponse.json();
+      availableDoctors = availableData.doctors;
+
+      renderPendingRequests();
+      renderCurrentDoctors();
+      renderAvailableDoctors();
+
+    } catch (error) {
+      console.error('Error loading data:', error);
+      alert('Failed to load data: ' + error.message);
+    }
+  }
+
+  /**
+   * Render pending appointment requests from doctors
+   * Data comes from /appointments/api/doctors/pending/
+   */
+  function renderPendingRequests() {
+    const container = document.getElementById('pending-requests-container');
+    const loading = document.getElementById('pending-requests-loading');
+    const noPending = document.getElementById('no-pending-requests');
+
+    loading.classList.add('d-none');
+    container.innerHTML = '';  // Always clear container first
+
+    if (pendingRequests.length === 0) {
+      noPending.classList.remove('d-none');
+      return;
+    }
+
+    noPending.classList.add('d-none');
+
+    pendingRequests.forEach(doctor => {
+      const card = document.createElement('div');
+      card.className = 'card mb-2';
+      card.innerHTML = `
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-center">
+            <div>
+              <h6 class="mb-1">Dr. ${escapeHtml(doctor.first_name)} ${escapeHtml(doctor.last_name)}</h6>
+              <p class="text-muted mb-1 small">${escapeHtml(doctor.medical_organisation)}</p>
+              ${doctor.message ? `<p class="mb-2"><em>"${escapeHtml(doctor.message)}"</em></p>` : ''}
+              <small class="text-muted">Requested: ${new Date(doctor.created_at).toLocaleString()}</small>
+            </div>
+            <div>
+              <button class="btn btn-sm btn-success me-2" onclick="respondToRequest(${doctor.request_id}, 'approve', ${doctor.id}, '${doctor.username}')">
+                Approve
+              </button>
+              <button class="btn btn-sm btn-danger" onclick="respondToRequest(${doctor.request_id}, 'reject', ${doctor.id}, '${doctor.username}')">
+                Reject
+              </button>
+            </div>
+          </div>
+        </div>
+      `;
+      container.appendChild(card);
+    });
+  }
+
+  /**
+   * Render current/appointed doctors
+   * Data comes from /appointments/api/doctors/my/
+   */
+  function renderCurrentDoctors() {
+    const container = document.getElementById('current-doctors-container');
+    const loading = document.getElementById('current-doctors-loading');
+    const noCurrent = document.getElementById('no-current-doctors');
+
+    loading.classList.add('d-none');
+    container.innerHTML = '';  // Always clear container first
+
+    if (currentDoctors.length === 0) {
+      noCurrent.classList.remove('d-none');
+      return;
+    }
+
+    noCurrent.classList.add('d-none');
+
+    currentDoctors.forEach(doctor => {
+      const card = document.createElement('div');
+      card.className = 'card mb-2';
+      card.innerHTML = `
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-center">
+            <div>
+              <h6 class="mb-1">Dr. ${escapeHtml(doctor.first_name)} ${escapeHtml(doctor.last_name)}</h6>
+              <p class="text-muted mb-0 small">${escapeHtml(doctor.medical_organisation)}</p>
+            </div>
+            <button class="btn btn-sm btn-outline-danger" onclick="removeDoctor(${doctor.id}, ${doctor.user__id}, '${escapeHtml(doctor.last_name)}')">
+              Remove
+            </button>
+          </div>
+        </div>
+      `;
+      container.appendChild(card);
+    });
+  }
+
+  /**
+   * Render available doctors (not appointed and no pending requests)
+   * Data comes from /appointments/api/doctors/available/
+   */
+  async function renderAvailableDoctors() {
+    const container = document.getElementById('available-doctors-container');
+    const loading = document.getElementById('available-doctors-loading');
+
+    loading.classList.add('d-none');
+    container.innerHTML = '';  // Always clear container first
+
+    if (availableDoctors.length === 0) {
+      container.innerHTML = '<p class="text-muted">No doctors available to appoint</p>';
+      return;
+    }
+
+    availableDoctors.forEach(doctor => {
+      const card = document.createElement('div');
+      card.className = 'card mb-2';
+      card.innerHTML = `
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-center">
+            <div>
+              <h6 class="mb-1">Dr. ${escapeHtml(doctor.first_name)} ${escapeHtml(doctor.last_name)}</h6>
+              <p class="text-muted mb-0 small">${escapeHtml(doctor.medical_organisation)}</p>
+            </div>
+            <button class="btn btn-sm btn-primary" onclick="addDoctor(${doctor.id}, ${doctor.userId}, '${escapeHtml(doctor.last_name)}')">
+              Add Doctor
+            </button>
+          </div>
+        </div>
+      `;
+      container.appendChild(card);
+    });
+  }
+
+  window.respondToRequest = async function(requestId, action, doctorId, doctorUsername) {
+    try {
+      const response = await loggedFetch('/appointments/api/requests/respond/', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRFToken': getCsrfToken()
+        },
+        body: JSON.stringify({
+          request_id: requestId,
+          action: action
+        })
+      }, {
+        logger: standardLogger,
+        action: action === 'approve' ? 'approveAppointment' : 'declineAppointment',
+        username: patientUsername,
+        data: {
+          doctorId: doctorId,
+          doctorUsername: doctorUsername,
+          requestId: requestId
+        },
+        logOnSuccess: true,
+        logOnError: true
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to respond to request');
+      }
+
+      if (action === 'approve') {
+        // Share all patient files with the newly appointed doctor
+        if (session) {
+          try {
+            const shareResult = await FileOperations.shareAllPatientFilesWithDoctor(doctorId);
+
+            if (shareResult.errors && shareResult.errors.length > 0) {
+              console.warn('Some files failed to share:', shareResult.errors);
+            } else {
+              console.log(`Successfully shared ${shareResult.files_shared} files (${shareResult.versions_shared} versions) with Dr. ${doctorUsername}`);
+            }
+          } catch (shareError) {
+            console.error('Failed to share files with doctor:', shareError);
+          }
+        } else {
+          console.warn('Session is locked. Files will not be shared automatically.');
+        }
+      }
+
+      // Reload data
+      await loadData();
+
+    } catch (error) {
+      alert('Error: ' + error.message);
+    }
+  };
+
+  window.addDoctor = async function(doctorId, userId, doctorName) {
+    if (!confirm(`Add Dr. ${doctorName} to your doctors?`)) return;
+
+    try {
+      const response = await loggedFetch('/appointments/api/doctors/add/', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRFToken': getCsrfToken()
+        },
+        body: JSON.stringify({
+          doctor_id: doctorId
+        })
+      }, {
+        logger: standardLogger,
+        action: 'addDoctorToList',
+        username: patientUsername,
+        data: {
+          doctorId: doctorId,
+          doctorName: doctorName
+        },
+        logOnSuccess: true,
+        logOnError: true
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to add doctor');
+      }
+
+      // Share all patient files with the newly added doctor
+      if (session) {
+        try {
+          console.log(`Sharing all patient files with doctor (user_id: ${userId})...`);
+          const shareResult = await FileOperations.shareAllPatientFilesWithDoctor(userId);
+
+          console.log(`Successfully shared ${shareResult.files_shared} files (${shareResult.versions_shared} versions) with Dr. ${doctorName}`);
+
+          if (shareResult.errors && shareResult.errors.length > 0) {
+            console.warn('Some files failed to share:', shareResult.errors);
+          } else {
+            console.log(`Doctor added successfully! Shared ${shareResult.files_shared} file(s) with Dr. ${doctorName}.`);
+          }
+        } catch (shareError) {
+          console.error('Failed to share files with doctor:', shareError);
+        }
+      } else {
+        console.warn('Session is locked. Files will not be shared automatically.');
+      }
+
+      // Reload data
+      await loadData();
+
+    } catch (error) {
+      alert('Error: ' + error.message);
+    }
+  };
+
+  window.removeDoctor = async function(doctorId, userId, doctorName) {
+    if (!confirm(`Remove Dr. ${doctorName} from your doctors?`)) return;
+
+    try {
+      const response = await loggedFetch('/appointments/api/doctors/remove/', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRFToken': getCsrfToken()
+        },
+        body: JSON.stringify({
+          doctor_id: doctorId
+        })
+      }, {
+        logger: standardLogger,
+        action: 'removeDoctorFromList',
+        username: patientUsername,
+        data: {
+          doctorId: doctorId,
+          doctorName: doctorName
+        },
+        logOnSuccess: true,
+        logOnError: true
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to remove doctor');
+      }
+
+      await revokeAccess(userId);
+      // Reload data
+      await loadData();
+
+    } catch (error) {
+      alert('Error: ' + error.message);
+    }
+  };
+
+  function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  async function revokeAccess(doctorId) {
+    await FileOperations.revokeAccess(doctorId)
+  }
+
+  function getCsrfToken() {
+    return document.querySelector('[name=csrfmiddlewaretoken]')?.value ||
+           document.cookie.split('; ').find(row => row.startsWith('csrftoken='))?.split('=')[1] || '';
+  }
+
+  // Load data on page load
+  loadData();
+});
+</script>
+{% endblock %}

@@ -1,0 +1,320 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}My Patients{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+  <div class="row">
+    <div class="col-md-12">
+      <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2>Manage My Patients</h2>
+        <a href="/private/" class="btn btn-secondary">Back to Dashboard</a>
+      </div>
+
+      <!-- Pending Requests to Patients -->
+      <div class="card mb-4">
+        <div class="card-header bg-warning text-dark">
+          <h5 class="mb-0">Pending Appointment Requests</h5>
+        </div>
+        <div class="card-body" id="pending-requests-section">
+          <div id="pending-requests-loading" class="text-center py-3">
+            <div class="spinner-border spinner-border-sm text-primary" role="status">
+              <span class="visually-hidden">Loading...</span>
+            </div>
+            Loading requests...
+          </div>
+          <div id="pending-requests-container"></div>
+          <div id="no-pending-requests" class="text-muted d-none">No pending requests</div>
+        </div>
+      </div>
+
+      <!-- My Current Patients -->
+      <div class="card mb-4">
+        <div class="card-header bg-success text-white">
+          <h5 class="mb-0">My Current Patients</h5>
+        </div>
+        <div class="card-body">
+          <div id="current-patients-loading" class="text-center py-3">
+            <div class="spinner-border spinner-border-sm text-primary" role="status">
+              <span class="visually-hidden">Loading...</span>
+            </div>
+            Loading your patients...
+          </div>
+          <div id="current-patients-container"></div>
+          <div id="no-current-patients" class="text-muted d-none">No patients assigned yet</div>
+        </div>
+      </div>
+
+      <!-- Available Patients (to send requests) -->
+      <div class="card">
+        <div class="card-header bg-primary text-white">
+          <h5 class="mb-0">Send Appointment Requests</h5>
+        </div>
+        <div class="card-body">
+          <div id="available-patients-loading" class="text-center py-3">
+            <div class="spinner-border spinner-border-sm text-primary" role="status">
+              <span class="visually-hidden">Loading...</span>
+            </div>
+            Loading available patients...
+          </div>
+          <div id="available-patients-container"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Request Modal -->
+<div class="modal fade" id="requestModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Send Appointment Request</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p>Send appointment request to <strong id="patient-name"></strong>?</p>
+        <div class="mb-3">
+          <label for="request-message" class="form-label">Message (optional)</label>
+          <textarea class="form-control" id="request-message" rows="3" placeholder="Introduce yourself or explain why you'd like to be their doctor..."></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="send-request-btn">Send Request</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const CURRENT_DOCTOR_USERNAME = "{{ request.user.username }}";
+
+document.addEventListener("DOMContentLoaded", function() {
+  let currentPatients = [];
+  let pendingRequests = [];
+  let availablePatients = [];
+  let selectedPatientId = null;
+  let requestModal = null;
+
+  /**
+   * Load data from three separate endpoints:
+   * 1. Current/appointed patients
+   * 2. Patients with pending appointment requests
+   * 3. Available patients (not current patients, no pending requests)
+   */
+  async function loadData() {
+    try {
+      // Fetch current patients (log browsing action)
+      const currentResponse = await loggedFetch('/appointments/api/patients/appointed/', {}, {
+        logger: standardLogger,
+        action: 'browsePatientsList',
+        username: CURRENT_DOCTOR_USERNAME,
+        logOnSuccess: true,
+        logOnError: true
+      });
+      if (!currentResponse.ok) throw new Error('Failed to load current patients');
+      const currentData = await currentResponse.json();
+      currentPatients = currentData.patients;
+
+      // Fetch pending requests to patients
+      const pendingResponse = await fetch('/appointments/api/patients/pending/');
+      if (!pendingResponse.ok) throw new Error('Failed to load pending requests');
+      const pendingData = await pendingResponse.json();
+      pendingRequests = pendingData.patients;
+
+      // Fetch available patients
+      const availableResponse = await fetch('/appointments/api/patients/available/');
+      if (!availableResponse.ok) throw new Error('Failed to load available patients');
+      const availableData = await availableResponse.json();
+      availablePatients = availableData.patients;
+
+      renderPendingRequests();
+      renderCurrentPatients();
+      renderAvailablePatients();
+
+    } catch (error) {
+      console.error('Error loading data:', error);
+      alert('Failed to load data: ' + error.message);
+    }
+  }
+
+  /**
+   * Render pending appointment requests sent to patients
+   * Data comes from /appointments/api/patients/pending/
+   */
+  function renderPendingRequests() {
+    const container = document.getElementById('pending-requests-container');
+    const loading = document.getElementById('pending-requests-loading');
+    const noPending = document.getElementById('no-pending-requests');
+
+    loading.classList.add('d-none');
+    container.innerHTML = '';
+
+    if (pendingRequests.length === 0) {
+      noPending.classList.remove('d-none');
+      return;
+    }
+
+    noPending.classList.add('d-none');
+
+    pendingRequests.forEach(patient => {
+      const card = document.createElement('div');
+      card.className = 'card mb-2';
+      card.innerHTML = `
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-center">
+            <div>
+              <h6 class="mb-1">@${escapeHtml(patient.username)}</h6>
+              ${patient.message ? `<p class="mb-2"><em>"${escapeHtml(patient.message)}"</em></p>` : ''}
+              <small class="text-muted">Requested: ${new Date(patient.created_at).toLocaleString()}</small>
+            </div>
+            <span class="badge bg-warning text-dark">Awaiting Response</span>
+          </div>
+        </div>
+      `;
+      container.appendChild(card);
+    });
+  }
+
+  /**
+   * Render current/appointed patients
+   * Data comes from /appointments/api/patients/appointed/
+   */
+  async function renderCurrentPatients() {
+    const container = document.getElementById('current-patients-container');
+    const loading = document.getElementById('current-patients-loading');
+    const noCurrent = document.getElementById('no-current-patients');
+
+    loading.classList.add('d-none');
+    container.innerHTML = '';
+
+    if (currentPatients.length === 0) {
+      noCurrent.classList.remove('d-none');
+      return;
+    }
+
+    noCurrent.classList.add('d-none');
+
+    currentPatients.forEach(patient => {
+      const card = document.createElement('div');
+      card.className = 'card mb-2';
+      card.innerHTML = `
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-center">
+            <div>
+              <h6 class="mb-1">@${escapeHtml(patient.username)}</h6>
+            </div>
+            <span class="badge bg-success">Active Patient</span>
+          </div>
+        </div>
+      `;
+      container.appendChild(card);
+    });
+  }
+
+  /**
+   * Render available patients (not current patients and no pending requests)
+   * Data comes from /appointments/api/patients/available/
+   */
+  function renderAvailablePatients() {
+    const container = document.getElementById('available-patients-container');
+    const loading = document.getElementById('available-patients-loading');
+
+    loading.classList.add('d-none');
+    container.innerHTML = '';
+
+    if (availablePatients.length === 0) {
+      container.innerHTML = '<p class="text-muted">No patients available</p>';
+      return;
+    }
+
+    availablePatients.forEach(patient => {
+      const card = document.createElement('div');
+      card.className = 'card mb-2';
+
+      card.innerHTML = `
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-center">
+            <div>
+              <h6 class="mb-1">@${escapeHtml(patient.username)}</h6>
+            </div>
+            <button class="btn btn-sm btn-primary" onclick="showRequestModal(${patient.id}, '${escapeHtml(patient.username)}')">Send Request</button>
+          </div>
+        </div>
+      `;
+      container.appendChild(card);
+    });
+  }
+
+  window.showRequestModal = function(patientId, patientName) {
+    selectedPatientId = patientId;
+    document.getElementById('patient-name').innerText = patientName;
+    document.getElementById('request-message').value = '';
+
+    if (!requestModal) {
+      requestModal = new bootstrap.Modal(document.getElementById('requestModal'));
+    }
+    requestModal.show();
+  };
+
+  document.getElementById('send-request-btn').addEventListener('click', async function() {
+    const message = document.getElementById('request-message').value.trim();
+
+    try {
+      const response = await loggedFetch('/appointments/api/requests/send/', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRFToken': getCsrfToken()
+        },
+        body: JSON.stringify({
+          patient_id: selectedPatientId,
+          message: message
+        })
+      }, {
+        logger: standardLogger,
+        action: 'requestAppointment',
+        username: CURRENT_DOCTOR_USERNAME,
+        data: {
+          patientId: selectedPatientId,
+          message: message
+        },
+        logOnSuccess: true,
+        logOnError: true
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to send request');
+      }
+
+      requestModal.hide();
+
+      // Reload data
+      await loadData();
+
+      alert('Request sent successfully!');
+
+    } catch (error) {
+      alert('Error: ' + error.message);
+    }
+  });
+
+  function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  function getCsrfToken() {
+    return document.querySelector('[name=csrfmiddlewaretoken]')?.value ||
+           document.cookie.split('; ').find(row => row.startsWith('csrftoken='))?.split('=')[1] || '';
+  }
+
+  // Load data on page load
+  loadData();
+});
+</script>
+{% endblock %}

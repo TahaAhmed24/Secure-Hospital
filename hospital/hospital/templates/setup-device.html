@@ -1,0 +1,280 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}Setup Device{% endblock %}
+
+{% block content %}
+<script src="{% static 'crypto.js' %}"></script>
+<script>
+  // Store user ID and username globally for user-specific device key storage
+  window.currentUserId = {{ user.id }};
+  window.currentUsername = "{{ user.username }}";
+</script>
+
+<div class="container py-5">
+  <div class="row justify-content-center">
+    <div class="col-md-8">
+      <div class="card shadow">
+        <div class="card-header bg-primary text-white">
+          <h3 class="mb-0">Setup This Device</h3>
+        </div>
+        <div class="card-body">
+          <div id="step-1" class="setup-step">
+            <h5 class="card-title">Device Information</h5>
+            <p class="text-muted">Give this device a friendly name so you can identify it later.</p>
+
+            <div class="mb-3">
+              <label for="device-name" class="form-label">Device Name</label>
+              <input type="text" class="form-control" id="device-name" placeholder="e.g., My Laptop, Work Computer, Phone" required>
+              <small class="text-muted">Detected: <span id="detected-device"></span></small>
+            </div>
+
+            <div id="recovery-section" class="d-none">
+              <div class="alert alert-info">
+                <strong>Recovery Required</strong> - Please enter your recovery string to setup this device.
+              </div>
+              <div class="mb-3">
+                <label for="recovery-input" class="form-label">Recovery String</label>
+                <input type="text" class="form-control font-monospace" id="recovery-input" placeholder="Enter your recovery string">
+              </div>
+            </div>
+
+            <button class="btn btn-primary" id="setup-button">
+              Setup Device
+            </button>
+          </div>
+
+          <div id="step-2" class="setup-step d-none">
+            <h5 class="card-title">Setting Up Your Device</h5>
+            <div class="text-center py-4">
+              <div class="spinner-border text-primary mb-3" role="status">
+                <span class="visually-hidden">Loading...</span>
+              </div>
+              <p id="status-message">Generating device-specific encryption key...</p>
+              <small class="text-muted">This may take a few seconds</small>
+            </div>
+          </div>
+
+          <div id="step-error" class="setup-step d-none">
+            <div class="alert alert-danger">
+              <h5>Setup Failed</h5>
+              <p id="error-message"></p>
+              <button class="btn btn-danger" onclick="location.reload()">Try Again</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+  const isNewDevice = !sessionStorage.getItem('recovery_string_temp');
+
+  // Detect device info
+  function getDeviceInfo() {
+    const ua = navigator.userAgent;
+    let deviceType = 'Unknown Device';
+
+    if (/Mobile|Android|iPhone|iPad|iPod/.test(ua)) {
+      deviceType = 'Mobile Device';
+    } else if (/Mac/.test(ua)) {
+      deviceType = 'Mac';
+    } else if (/Win/.test(ua)) {
+      deviceType = 'Windows PC';
+    } else if (/Linux/.test(ua)) {
+      deviceType = 'Linux PC';
+    }
+
+    return deviceType;
+  }
+
+  document.getElementById('detected-device').innerText = getDeviceInfo();
+
+  // If this is a new device (not coming from key setup), show recovery input
+  if (isNewDevice) {
+    document.getElementById('recovery-section').classList.remove('d-none');
+
+    // Check URL params to see if device was revoked
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.get('revoked') === 'true') {
+      const alertDiv = document.createElement('div');
+      alertDiv.className = 'alert alert-warning mb-3';
+      alertDiv.innerHTML = '<strong>Device Access Revoked:</strong> This device\'s access was revoked. Please enter your recovery string to regain access.';
+      document.getElementById('step-1').insertBefore(alertDiv, document.getElementById('step-1').firstChild);
+    }
+  }
+
+  // Setup device
+  document.getElementById('setup-button').addEventListener('click', async function() {
+    const deviceName = document.getElementById('device-name').value.trim();
+
+    if (!deviceName) {
+      alert('Please enter a device name');
+      return;
+    }
+
+    let recoveryString;
+
+    if (isNewDevice) {
+      recoveryString = document.getElementById('recovery-input').value.trim();
+      if (!recoveryString) {
+        alert('Please enter your recovery string');
+        return;
+      }
+    } else {
+      recoveryString = sessionStorage.getItem('recovery_string_temp');
+    }
+
+    document.getElementById('step-1').classList.add('d-none');
+    document.getElementById('step-2').classList.remove('d-none');
+
+    try {
+      // Fetch user's encrypted keys from server
+      document.getElementById('status-message').innerText = 'Fetching your encrypted keys...';
+      const keysResponse = await fetch('/records/api/keys/me/', {
+        headers: {
+          'X-CSRFToken': getCsrfToken()
+        }
+      });
+
+      if (!keysResponse.ok) {
+        throw new Error('Failed to fetch keys from server');
+      }
+
+      const keysData = await keysResponse.json();
+
+      // Decrypt keys with recovery string
+      document.getElementById('status-message').innerText = 'Decrypting your keys...';
+      const encPrivateKey = await E2EECrypto.decryptPrivateKey(
+        keysData.enc_encrypted_private_key,
+        keysData.enc_salt,
+        recoveryString,
+        false
+      );
+      const signPrivateKey = await E2EECrypto.decryptPrivateKey(
+        keysData.sign_encrypted_private_key,
+        keysData.sign_salt,
+        recoveryString,
+        true
+      );
+
+      // Generate device-specific symmetric key (non-extractable for security)
+      document.getElementById('status-message').innerText = 'Generating device key...';
+      const deviceKey = await E2EECrypto.generateDeviceKey();
+
+      // Encrypt private keys with device key
+      document.getElementById('status-message').innerText = 'Encrypting keys for this device...';
+      const deviceEncryptedEncKey = await E2EECrypto.encryptPrivateKeyWithKey(encPrivateKey, deviceKey);
+      const deviceEncryptedSignKey = await E2EECrypto.encryptPrivateKeyWithKey(signPrivateKey, deviceKey);
+
+      // Note: Device key is non-extractable and will be stored directly as CryptoKey object
+      // Send to server first to get device_id
+      document.getElementById('status-message').innerText = 'Registering device with server...';
+      const setupResponse = await loggedFetch('/records/api/device/setup/', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRFToken': getCsrfToken()
+        },
+        body: JSON.stringify({
+          friendly_name: deviceName,
+          device_encrypted_enc_private_key: deviceEncryptedEncKey,
+          device_encrypted_sign_private_key: deviceEncryptedSignKey,
+          user_agent: navigator.userAgent
+        })
+      }, {
+        logger: securityLogger,
+        action: 'setupDevice',
+        username: window.currentUsername,
+        data: {
+          deviceName: deviceName,
+          deviceKeyGenerated: true,
+          keysEncryptedWithDeviceKey: true
+        },
+        logOnSuccess: true,
+        logOnError: true
+      });
+
+      if (!setupResponse.ok) {
+        const error = await setupResponse.json();
+        throw new Error(error.error || 'Failed to setup device');
+      }
+
+      const setupData = await setupResponse.json();
+      const deviceId = setupData.device_id;
+
+      // Store device key and device ID in IndexedDB
+      document.getElementById('status-message').innerText = 'Storing device credentials locally...';
+      await storeDeviceCredentials(deviceKey, deviceId);
+
+      // Clear temporary recovery string
+      sessionStorage.removeItem('recovery_string_temp');
+
+      // Success - redirect to main app
+      window.location.href = '/profile/';
+
+    } catch (error) {
+      console.error('Device setup error:', error);
+      document.getElementById('step-2').classList.add('d-none');
+      document.getElementById('step-error').classList.remove('d-none');
+      document.getElementById('error-message').innerText = error.message;
+    }
+  });
+
+  function storeDeviceCredentials(deviceKey, deviceId) {
+    return new Promise((resolve, reject) => {
+      const indexedDB = window.indexedDB || window.mozIndexedDB || window.webkitIndexedDB || window.msIndexedDB || window.shimIndexedDB;
+      const open = indexedDB.open("HospitalDB", 2);
+
+      open.onupgradeneeded = function(event) {
+        const db = event.target.result;
+        if (!db.objectStoreNames.contains("KeyStore")) {
+          db.createObjectStore("KeyStore", { keyPath: "id" });
+        }
+      };
+
+      open.onsuccess = function(event) {
+        const db = event.target.result;
+
+        // Check if KeyStore exists before trying to use it
+        if (!db.objectStoreNames.contains("KeyStore")) {
+          db.close();
+          reject(new Error('KeyStore was not created'));
+          return;
+        }
+
+        const tx = db.transaction("KeyStore", "readwrite");
+        const store = tx.objectStore("KeyStore");
+
+        // Store device key (CryptoKey object) and device ID with user-specific keys for multi-user support
+        // The CryptoKey is non-extractable and can only be used for encrypt/decrypt operations
+        const userId = window.currentUserId;
+        store.put({ id: `device_key_${userId}`, key: deviceKey });
+        store.put({ id: `device_id_${userId}`, value: deviceId });
+
+        tx.oncomplete = function() {
+          db.close();
+          resolve();
+        };
+
+        tx.onerror = function(e) {
+          db.close();
+          reject(new Error('Failed to store device credentials: ' + e.target.error));
+        };
+      };
+
+      open.onerror = function(event) {
+        reject(new Error('Failed to open IndexedDB: ' + event.target.error));
+      };
+    });
+  }
+
+  function getCsrfToken() {
+    return document.querySelector('[name=csrfmiddlewaretoken]')?.value ||
+           document.cookie.split('; ').find(row => row.startsWith('csrftoken='))?.split('=')[1] || '';
+  }
+});
+</script>
+{% endblock %}

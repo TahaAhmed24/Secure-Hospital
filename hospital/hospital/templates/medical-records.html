@@ -1,0 +1,742 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}My Medical Records{% endblock %}
+
+{% block content %}
+<script src="{% static 'crypto.js' %}"></script>
+<script src="{% static 'fileOperations.js' %}"></script>
+<script src="{% static 'session.js' %}"></script>
+
+<div class="container py-5">
+  <div class="row">
+    <div class="col-md-12">
+      <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2>Medical Records</h2>
+        <a href="/private/" class="btn btn-secondary">Back to Dashboard</a>
+      </div>
+
+      <!-- For Doctors: Patient Selection -->
+      {% if request.session.role == 'doctor' %}
+      <div class="card mb-4">
+        <div class="card-header bg-info text-white">
+          <h5 class="mb-0">Select Patient</h5>
+        </div>
+        <div class="card-body">
+          <select class="form-select" id="patient-select">
+            <option value="">-- Select a patient --</option>
+          </select>
+          <small class="text-muted">Select a patient to view their medical records</small>
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- Session Status -->
+      <div id="session-loading" class="alert alert-info">
+        <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+        Loading your encryption keys...
+      </div>
+
+      <div id="session-error" class="alert alert-danger d-none">
+        <h5>Failed to Load Keys</h5>
+        <p id="error-message"></p>
+        <button class="btn btn-warning" onclick="showRecoveryModal()">Use Recovery String</button>
+      </div>
+
+      <!-- Main Content (hidden until session unlocked) -->
+      <div id="main-content" class="d-none">
+
+        <!-- Upload Section -->
+        <div class="card mb-4" id="upload-section">
+          <div class="card-header bg-primary text-white">
+            <h5 class="mb-0">Upload Medical File</h5>
+          </div>
+          <div class="card-body">
+            {% if request.session.role == 'doctor' %}
+            <div id="no-patient-selected" class="alert alert-info">
+              Please select a patient above to upload files to their medical record.
+            </div>
+            <div id="upload-form" class="d-none">
+            {% else %}
+            <div id="upload-form">
+            {% endif %}
+              <div class="mb-3">
+                <label for="file-input" class="form-label">Select File</label>
+                <input type="file" class="form-control" id="file-input">
+                <small class="text-muted">
+                  {% if request.session.role == 'doctor' %}
+                  File will be encrypted and added to the patient's medical record
+                  {% else %}
+                  File will be encrypted and automatically shared with your appointed doctors
+                  {% endif %}
+                </small>
+              </div>
+              <button class="btn btn-primary" onclick="uploadFile()">
+                <i class="bi bi-upload"></i> Upload & Encrypt
+              </button>
+              <div id="upload-progress" class="mt-2"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Files List -->
+        <div class="card">
+          <div class="card-header bg-success text-white">
+            <h5 class="mb-0">Medical Files</h5>
+          </div>
+          <div class="card-body">
+            <div id="files-loading" class="text-center py-3">
+              <div class="spinner-border spinner-border-sm text-primary" role="status"></div>
+              Loading files...
+            </div>
+            <div id="files-container"></div>
+            <div id="no-files" class="text-muted d-none">No medical files yet</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Recovery Modal -->
+<div class="modal fade" id="recoveryModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Enter Recovery String</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p>Your device keys couldn't be loaded. Please enter your recovery string:</p>
+        <input type="text" class="form-control font-monospace" id="recovery-input" placeholder="Enter recovery string">
+        <div id="recovery-error" class="text-danger mt-2"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" onclick="unlockWithRecovery()">Unlock</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  window.currentUserId = {{ user.id }};
+  const currentUsername = '{{ request.user.username }}';
+  let recoveryModal = null;
+  const userRole = '{{ request.session.role }}';
+  let selectedPatientId = null;
+
+  /**
+   * Initialize the page on load
+   * Automatically unlocks the session from device keys and loads appropriate content
+   * For doctors: loads patient selection list
+   * For patients: loads their own medical files
+   */
+  async function init() {
+    await session.autoUnlockFromDevice();
+
+    document.getElementById('session-loading').classList.add('d-none');
+    document.getElementById('main-content').classList.remove('d-none');
+
+    // Load patient list for doctors
+    if (userRole === 'doctor') {
+      await loadPatients();
+    } else {
+      // For patients, load their own files immediately
+      await loadFiles();
+    }
+  }
+
+  /**
+   * Load the list of patients for doctor users
+   * Populates the patient selection dropdown and sets up event handlers
+   * When a patient is selected, their medical files are loaded
+   */
+  async function loadPatients() {
+    try {
+      const response = await fetch('/appointments/api/patients/appointed/');
+      const data = await response.json();
+
+      const select = document.getElementById('patient-select');
+      data.patients.forEach(patient => {
+        const option = document.createElement('option');
+        option.value = patient.id;
+        option.textContent = `@${patient.username}`;
+        select.appendChild(option);
+      });
+
+      // Handle patient selection changes
+      select.addEventListener('change', function() {
+        selectedPatientId = this.value ? parseInt(this.value) : null;
+
+        if (selectedPatientId) {
+          // Show upload form for selected patient
+          document.getElementById('no-patient-selected').classList.add('d-none');
+          document.getElementById('upload-form').classList.remove('d-none');
+
+          // Load files for selected patient
+          loadFiles();
+        } else {
+          // Hide upload form when no patient selected
+          document.getElementById('no-patient-selected').classList.remove('d-none');
+          document.getElementById('upload-form').classList.add('d-none');
+
+          // Clear files list
+          document.getElementById('files-container').innerHTML = '';
+          document.getElementById('no-files').classList.add('d-none');
+        }
+      });
+
+    } catch (error) {
+      console.error('Failed to load patients:', error);
+    }
+  }
+
+  /**
+   * Upload and encrypt a file, then auto-share with appropriate recipients
+   * Uses FileOperations.uploadFile() to handle encryption and upload
+   * For patients: automatically shares with their appointed doctors
+   * For doctors: uploads to patient's record (pending approval) and shares with patient + their doctors
+   */
+  async function uploadFile() {
+    const fileInput = document.getElementById('file-input');
+    const file = fileInput.files[0];
+
+    if (!file) {
+      alert('Please select a file');
+      return;
+    }
+
+    if (userRole === 'doctor' && !selectedPatientId) {
+      alert('Please select a patient first');
+      return;
+    }
+
+    const progress = document.getElementById('upload-progress');
+    progress.innerHTML = '<div class="spinner-border spinner-border-sm me-2"></div>Encrypting and uploading...';
+
+    try {
+      // Get users to share with based on role
+      let apiUrl = '/records/api/users/';
+
+      // For doctors uploading to a patient's record, get patient + patient's doctors
+      if (userRole === 'doctor' && selectedPatientId) {
+        apiUrl += `?patient_id=${selectedPatientId}`;
+      }
+
+      const usersResponse = await fetch(apiUrl);
+      const usersData = await usersResponse.json();
+
+      // Share with returned users (for patients: their doctors, for doctors: patient + patient's doctors)
+      const recipientIds = usersData.users.map(u => u.id);
+
+      // Upload file using FileOperations class (pass patient_id for doctor uploads to set pending status)
+      const patientIdForUpload = (userRole === 'doctor' && selectedPatientId) ? selectedPatientId : null;
+      await FileOperations.uploadFile(file, recipientIds, patientIdForUpload);
+
+      const successMessage = (userRole === 'doctor' && selectedPatientId)
+        ? 'File uploaded! Awaiting patient approval...'
+        : 'File uploaded and shared successfully!';
+      progress.innerHTML = `<div class="alert alert-success">${successMessage}</div>`;
+      fileInput.value = '';
+
+      // Reload files after a short delay
+      setTimeout(() => {
+        progress.innerHTML = '';
+        loadFiles();
+      }, 2000);
+
+    } catch (error) {
+      await standardLogger.logMessage(`Failed to upload file ${file.name}: ${error.message}`, 'error');
+      progress.innerHTML = `<div class="alert alert-danger">Upload failed: ${error.message}</div>`;
+    }
+  }
+
+  /**
+   * Load and display medical files
+   * Fetches encrypted files from API, decrypts filenames, and displays them
+   * For doctors: loads files for the selected patient
+   * For patients: loads their own files
+   * Files are displayed with appropriate action buttons based on status and user role
+   */
+  async function loadFiles() {
+    const container = document.getElementById('files-container');
+    const loading = document.getElementById('files-loading');
+    const noFiles = document.getElementById('no-files');
+
+    try {
+      // For doctors, require patient selection
+      if (userRole === 'doctor' && !selectedPatientId) {
+        loading.classList.add('d-none');
+        container.innerHTML = '<div class="alert alert-info">Please select a patient above to view their medical files.</div>';
+        return;
+      }
+
+      loading.classList.remove('d-none');
+      container.innerHTML = '';
+      noFiles.classList.add('d-none');
+
+      // Build API URL with optional patient filter for doctors
+      let apiUrl = '/records/api/files/list/';
+      if (userRole === 'doctor' && selectedPatientId) {
+        apiUrl += `?patient_id=${selectedPatientId}`;
+      }
+
+      // Fetch files from API
+      const response = await fetch(apiUrl);
+      const data = await response.json();
+
+      if (!session.isUnlocked) {
+        throw new Error('Session not unlocked');
+      }
+
+      // Decrypt filenames for each file
+      const files = [];
+      for (const file of data.files) {
+        try {
+          // Decrypt symmetric key with encryption private key
+          const symmetricKey = await E2EECrypto.decryptSymmetricKey(
+            file.encrypted_symmetric_key,
+            session.getEncryptionPrivateKey()
+          );
+
+          // Decrypt filename
+          const filename = await E2EECrypto.decryptText(
+            file.encrypted_filename,
+            symmetricKey
+          );
+
+          files.push({
+            ...file,
+            filename: filename
+          });
+        } catch (error) {
+          console.error('Failed to decrypt file:', error);
+          files.push({
+            ...file,
+            filename: '[Decryption failed]'
+          });
+        }
+      }
+
+      loading.classList.add('d-none');
+
+      if (files.length === 0) {
+        noFiles.classList.remove('d-none');
+        return;
+      }
+
+      files.forEach(file => {
+        const card = document.createElement('div');
+        const isPending = file.status === 'pending';
+        const hasDeletionRequest = file.deletion_requested;
+
+        // Card styling
+        let cardClass = 'card mb-2';
+        if (isPending) {
+          cardClass += ' border-warning';
+        } else if (hasDeletionRequest) {
+          cardClass += ' border-danger';
+        }
+        card.className = cardClass;
+
+        // Build action buttons based on status, deletion request, and role
+        let actionButtons = '';
+        let statusBadge = '';
+
+        if (isPending && userRole === 'patient') {
+          // Patient can approve/reject pending upload
+          actionButtons = `
+            <button class="btn btn-sm btn-success me-1" onclick="approveFile(${file.id}, '${escapeHtml(file.filename)}')">
+              <i class="bi bi-check-circle"></i> Approve
+            </button>
+            <button class="btn btn-sm btn-danger" onclick="deleteFile(${file.id}, '${escapeHtml(file.filename)}')">
+              <i class="bi bi-x-circle"></i> Reject
+            </button>
+          `;
+          statusBadge = '<span class="badge bg-warning text-dark ms-2">Pending Approval</span>';
+        } else if (!isPending && hasDeletionRequest && userRole === 'patient') {
+          // Patient can approve/reject deletion request
+          actionButtons = `
+            <button class="btn btn-sm btn-primary me-1" onclick="downloadFile(${file.id}, '${file.encrypted_symmetric_key}', '${escapeHtml(file.filename)}', ${file.version})">
+              <i class="bi bi-download"></i> Download
+            </button>
+            <button class="btn btn-sm btn-success me-1" onclick="approveDeletion(${file.id}, '${escapeHtml(file.filename)}')">
+              <i class="bi bi-check-circle"></i> Approve Delete
+            </button>
+            <button class="btn btn-sm btn-warning" onclick="rejectDeletion(${file.id}, '${escapeHtml(file.filename)}')">
+              <i class="bi bi-x-circle"></i> Deny Delete
+            </button>
+          `;
+          statusBadge = `<span class="badge bg-danger ms-2">Delete Requested by ${escapeHtml(file.deletion_requested_by)}</span>`;
+        } else if (!isPending && hasDeletionRequest && userRole === 'doctor') {
+          // Doctor sees deletion already requested
+          actionButtons = `
+            <button class="btn btn-sm btn-primary" onclick="downloadFile(${file.id}, '${file.encrypted_symmetric_key}', '${escapeHtml(file.filename)}', ${file.version})">
+              <i class="bi bi-download"></i> Download
+            </button>
+          `;
+          statusBadge = '<span class="badge bg-danger ms-2">Deletion Requested</span>';
+        } else if (!isPending && !hasDeletionRequest && userRole === 'patient') {
+          // Patient can delete their own files directly
+          actionButtons = `
+            <button class="btn btn-sm btn-primary me-1" onclick="downloadFile(${file.id}, '${file.encrypted_symmetric_key}', '${escapeHtml(file.filename)}', ${file.version})">
+              <i class="bi bi-download"></i> Download
+            </button>
+            <button class="btn btn-sm btn-danger" onclick="deleteFile(${file.id}, '${escapeHtml(file.filename)}')">
+              <i class="bi bi-trash"></i> Delete
+            </button>
+          `;
+        } else if (!isPending && !hasDeletionRequest && userRole === 'doctor') {
+          // Doctor can request deletion
+          actionButtons = `
+            <button class="btn btn-sm btn-primary me-1" onclick="downloadFile(${file.id}, '${file.encrypted_symmetric_key}', '${escapeHtml(file.filename)}', ${file.version})">
+              <i class="bi bi-download"></i> Download
+            </button>
+            <button class="btn btn-sm btn-warning" onclick="requestDeletion(${file.id}, '${escapeHtml(file.filename)}')">
+              <i class="bi bi-trash"></i> Request Delete
+            </button>
+          `;
+        }
+
+        card.innerHTML = `
+          <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center">
+              <div>
+                <h6 class="mb-1">
+                  <a href="/medical-records/${file.id}" class="text-decoration-none text-dark">
+                    ${escapeHtml(file.filename)}
+                  </a>
+                  ${statusBadge}
+                </h6>
+                <small class="text-muted">
+                  ${(file.file_size / 1024).toFixed(2)} KB •
+                  Uploaded by ${escapeHtml(file.uploaded_by)} •
+                  ${new Date(file.created_at).toLocaleDateString()}
+                </small>
+              </div>
+              <div>
+                ${actionButtons}
+              </div>
+            </div>
+          </div>
+        `;
+        container.appendChild(card);
+      });
+
+    } catch (error) {
+      loading.classList.add('d-none');
+      container.innerHTML = `<div class="alert alert-danger">Failed to load files: ${error.message}</div>`;
+    }
+  }
+
+  /**
+   * Download and decrypt a file
+   * Uses FileOperations.downloadFile() to decrypt the file content
+   * Automatically appends version number to the filename
+   * @param {number} fileId - The file ID
+   * @param {string} encryptedKey - The encrypted symmetric key for decryption
+   * @param {string} filename - The decrypted filename
+   * @param {number} version - The version number to append to filename
+   */
+  window.downloadFile = async function(fileId, encryptedKey, filename, version) {
+    try {
+      // Use FileOperations class to download and decrypt the file
+      const decryptedData = await FileOperations.downloadFile(fileId, encryptedKey, filename, version);
+
+      // Add version number to filename
+      const versionedFilename = addVersionToFilename(filename, version);
+
+      // Create and trigger download
+      const blob = new Blob([decryptedData]);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = versionedFilename;
+      a.click();
+      URL.revokeObjectURL(url);
+
+    } catch (error) {
+      await standardLogger.logMessage(`Failed to download file ${fileId} (${filename}): ${error.message}`, 'error');
+      alert(`Download failed: ${error.message}`);
+    }
+  };
+
+  /**
+   * Helper function to add version number to filename
+   * Inserts version number before the file extension
+   * @param {string} filename - The original filename
+   * @param {number} version - The version number to append
+   * @returns {string} The filename with version number (e.g., "file_v2.txt")
+   */
+  function addVersionToFilename(filename, version) {
+    const lastDotIndex = filename.lastIndexOf('.');
+    if (lastDotIndex === -1) {
+      // No extension
+      return `${filename}_v${version}`;
+    } else {
+      // Has extension - insert version before extension
+      const name = filename.substring(0, lastDotIndex);
+      const extension = filename.substring(lastDotIndex);
+      return `${name}_v${version}${extension}`;
+    }
+  }
+
+  /**
+   * Approve a pending file upload
+   * Uses VersionOperations.approveVersion() to approve the pending version
+   * @param {number} fileId - The file ID
+   * @param {string} filename - The decrypted filename for logging
+   */
+  window.approveFile = async function(fileId, filename) {
+    if (!confirm('Approve this file upload?')) return;
+
+    try {
+      // First, get file details to find the pending version
+      const fileResponse = await fetch(`/records/api/files/${fileId}`);
+      const fileData = await fileResponse.json();
+
+      // Find the first pending version
+      const pendingVersion = fileData.versions.find(v => v.status === 'pending');
+      if (!pendingVersion) {
+        alert('No pending version found');
+        return;
+      }
+
+      // Approve the pending version using VersionOperations class
+      await VersionOperations.approveVersion(fileId, pendingVersion.id);
+
+      // Log successful approval (security-critical action - changes access)
+      await securityLogger.log({
+        action: 'approveEdit',
+        username: currentUsername,
+        editorUsername: pendingVersion.created_by,
+        fileId: fileId,
+        fileName: filename,
+        versionId: pendingVersion.id,
+        timestamp: new Date().toISOString()
+      });
+
+      alert('File approved successfully!');
+      await loadFiles();  // Reload files
+    } catch (error) {
+      await standardLogger.logMessage(`Failed to approve file ${fileId} (${filename}): ${error.message}`, 'error');
+      alert(`Error: ${error.message}`);
+    }
+  };
+
+  /**
+   * Reject a pending file version
+   * Uses VersionOperations.rejectVersion() to reject the pending version
+   * @param {number} fileId - The file ID
+   * @param {string} filename - The decrypted filename for logging
+   */
+  window.rejectFile = async function(fileId, filename) {
+    if (!confirm('Reject this file version? This cannot be undone.')) return;
+
+    try {
+      // First, get file details to find the pending version
+      const fileResponse = await fetch(`/records/api/files/${fileId}`);
+      const fileData = await fileResponse.json();
+
+      // Find the first pending version
+      const pendingVersion = fileData.versions.find(v => v.status === 'pending');
+      if (!pendingVersion) {
+        alert('No pending version found');
+        return;
+      }
+
+      // Reject the pending version using VersionOperations class
+      await VersionOperations.rejectVersion(fileId, pendingVersion.id);
+
+      // Log rejection (security-critical action)
+      await securityLogger.log({
+        action: 'declineEdit',
+        username: currentUsername,
+        editorUsername: pendingVersion.created_by,
+        fileId: fileId,
+        fileName: filename,
+        versionId: pendingVersion.id,
+        reason: 'Rejected by patient',
+        timestamp: new Date().toISOString()
+      });
+
+      alert('File version rejected.');
+      await loadFiles();  // Reload files
+    } catch (error) {
+      await standardLogger.logMessage(`Failed to reject file ${fileId} (${filename}): ${error.message}`, 'error');
+      alert(`Error: ${error.message}`);
+    }
+  };
+
+  /**
+   * Delete a file (patient only) or reject a pending version
+   * Uses VersionOperations.deleteFile() to delete the file
+   * @param {number} fileId - The file ID
+   * @param {string} filename - The decrypted filename for logging
+   */
+  window.deleteFile = async function(fileId, filename) {
+    if (!confirm('Are you sure you want to delete this file? This cannot be undone.')) return;
+
+    try {
+      // Use VersionOperations class to delete the file
+      await VersionOperations.deleteFile(fileId);
+
+      // Log successful deletion (security-critical action)
+      await securityLogger.log({
+        action: 'deleteFile',
+        username: currentUsername,
+        fileId: fileId,
+        fileName: filename,
+        timestamp: new Date().toISOString()
+      });
+
+      alert('File deleted successfully.');
+      await loadFiles();  // Reload files
+    } catch (error) {
+      await standardLogger.logMessage(`Failed to delete file ${fileId} (${filename}): ${error.message}`, 'error');
+      alert(`Error: ${error.message}`);
+    }
+  };
+
+  /**
+   * Request deletion of a file (doctor only)
+   * Uses VersionOperations.requestDeletion() to submit the deletion request
+   * @param {number} fileId - The file ID
+   * @param {string} filename - The decrypted filename for logging
+   */
+  window.requestDeletion = async function(fileId, filename) {
+    if (!confirm('Request to delete this file from patient records? The patient must approve.')) return;
+
+    try {
+      // Use VersionOperations class to request deletion
+      await VersionOperations.requestDeletion(fileId);
+
+      // Log deletion request (security-critical action)
+      await securityLogger.log({
+        action: 'requestFileDeletion',
+        username: currentUsername,
+        fileId: fileId,
+        fileName: filename,
+        timestamp: new Date().toISOString()
+      });
+
+      alert('Deletion request submitted. Awaiting patient approval.');
+      await loadFiles();  // Reload files
+    } catch (error) {
+      await standardLogger.logMessage(`Failed to request deletion for file ${fileId} (${filename}): ${error.message}`, 'error');
+      alert(`Error: ${error.message}`);
+    }
+  };
+
+  /**
+   * Approve a deletion request (patient only)
+   * Uses VersionOperations.approveDeletion() to approve and delete the file
+   * @param {number} fileId - The file ID
+   * @param {string} filename - The decrypted filename for logging
+   */
+  window.approveDeletion = async function(fileId, filename) {
+    if (!confirm('Approve deletion of this file? This cannot be undone.')) return;
+
+    try {
+      // Use VersionOperations class to approve deletion
+      await VersionOperations.approveDeletion(fileId);
+
+      // Log deletion approval (security-critical action)
+      await securityLogger.log({
+        action: 'approveFileDeletion',
+        username: currentUsername,
+        fileId: fileId,
+        fileName: filename,
+        timestamp: new Date().toISOString()
+      });
+
+      alert('Deletion approved. File has been deleted.');
+      await loadFiles();  // Reload files
+    } catch (error) {
+      await standardLogger.logMessage(`Failed to approve deletion for file ${fileId} (${filename}): ${error.message}`, 'error');
+      alert(`Error: ${error.message}`);
+    }
+  };
+
+  /**
+   * Reject a deletion request (patient only)
+   * Uses VersionOperations.rejectDeletion() to deny the deletion request
+   * @param {number} fileId - The file ID
+   * @param {string} filename - The decrypted filename for logging
+   */
+  window.rejectDeletion = async function(fileId, filename) {
+    if (!confirm('Deny this deletion request? The file will remain in your records.')) return;
+
+    try {
+      // Use VersionOperations class to reject deletion request
+      await VersionOperations.rejectDeletion(fileId);
+
+      // Log rejection of deletion request (security-critical action)
+      await securityLogger.log({
+        action: 'rejectFileDeletion',
+        username: currentUsername,
+        fileId: fileId,
+        fileName: filename,
+        timestamp: new Date().toISOString()
+      });
+
+      alert('Deletion request denied.');
+      await loadFiles();  // Reload files
+    } catch (error) {
+      await standardLogger.logMessage(`Failed to reject deletion for file ${fileId} (${filename}): ${error.message}`, 'error');
+      alert(`Error: ${error.message}`);
+    }
+  };
+
+  // Recovery modal
+  window.showRecoveryModal = function() {
+    if (!recoveryModal) {
+      recoveryModal = new bootstrap.Modal(document.getElementById('recoveryModal'));
+    }
+    recoveryModal.show();
+  };
+
+  window.unlockWithRecovery = async function() {
+    const recoveryString = document.getElementById('recovery-input').value.trim();
+    const errorEl = document.getElementById('recovery-error');
+
+    if (!recoveryString) {
+      errorEl.innerText = 'Please enter your recovery string';
+      return;
+    }
+
+    try {
+      await session.unlockSession(recoveryString);
+
+      recoveryModal.hide();
+      document.getElementById('session-error').classList.add('d-none');
+      document.getElementById('main-content').classList.remove('d-none');
+
+      await loadFiles();
+
+    } catch (error) {
+      errorEl.innerText = 'Failed to unlock: ' + error.message;
+    }
+  };
+
+  /**
+   * Escape HTML special characters to prevent XSS attacks
+   * @param {string} text - The text to escape
+   * @returns {string} The escaped HTML-safe text
+   */
+  function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  // Make functions global
+  window.uploadFile = uploadFile;
+
+  // Initialize on page load
+  init();
+})();
+</script>
+{% endblock %}

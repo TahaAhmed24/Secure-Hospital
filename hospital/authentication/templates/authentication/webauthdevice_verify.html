@@ -1,0 +1,115 @@
+{% extends "webauth/base.html" %}
+{% block title %}Authentication Required{% endblock %}
+{% block content %}
+<div class="row justify-content-md-center">
+  <div class="col col-lg-5">
+    <div class="card shadow bg-light">
+      <h4 class="card-header">Authentication Required</h4>
+      <div class="card-body">
+        <p class="card-text">This resource requires authentication with a security key to continue.</p>
+        <p class="card-text text-muted">You can use a USB security key, phone, or scan a QR code.</p>
+        <button id="begin" type="button" class="btn btn-primary">Begin</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const nextUrl = new URL(window.location.href).searchParams.get("next");
+  document.getElementById("begin").addEventListener("click", begin);
+
+  async function begin() {
+    try {
+      const response = await fetch("{% url 'webauth:verification' %}");
+      const data = await response.json();
+      
+      const verificationArgs = {
+        publicKey: {
+          challenge: base64url_to_buffer(data.publicKey.challenge),
+          allowCredentials: data.publicKey.allowCredentials.map(cred => ({
+            id: base64url_to_buffer(cred.id),
+            type: cred.type,
+            transports: cred.transports,
+          })),
+          timeout: data.publicKey.timeout,
+          userVerification: data.publicKey.userVerification || "preferred",
+        },
+      };
+
+      const assertion = await navigator.credentials.get(verificationArgs);
+      await verify_on_server(assertion);
+    } catch (e) {
+      console.error("Authentication failed", e);
+      alert("Authentication failed. Please try again.");
+    }
+  }
+
+  async function verify_on_server(assertion) {
+    const data = {
+      id: assertion.id,
+      rawId: buffer_to_base64url(assertion.rawId),
+      response: {
+        authenticatorData: buffer_to_base64url(assertion.response.authenticatorData),
+        clientDataJSON: buffer_to_base64url(assertion.response.clientDataJSON),
+        signature: buffer_to_base64url(assertion.response.signature),
+        userHandle: assertion.response.userHandle ? buffer_to_base64url(assertion.response.userHandle) : null,
+      },
+      type: assertion.type,
+    };
+
+    try {
+      await fetch("{% url 'webauth:verification' %}", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "X-CSRFToken": getCookie("csrftoken"),
+        },
+        body: JSON.stringify(data),
+      });
+      window.location.href = nextUrl || "/";
+    } catch (e) {
+      console.error("Verifying on server failed", e);
+      alert("Verification failed. Please try again.");
+    }
+  }
+
+  // Convert base64url string to ArrayBuffer
+  function base64url_to_buffer(base64url) {
+    const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes.buffer;
+  }
+
+  // Convert ArrayBuffer to base64url string
+  function buffer_to_base64url(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary)
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=/g, '');
+  }
+
+  function getCookie(name) {
+    let cookieValue = null;
+    if (document.cookie && document.cookie !== '') {
+      const cookies = document.cookie.split(';');
+      for (let i = 0; i < cookies.length; i++) {
+        const cookie = cookies[i].trim();
+        if (cookie.substring(0, name.length + 1) === (name + '=')) {
+          cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+          break;
+        }
+      }
+    }
+    return cookieValue;
+  }
+</script>
+{% endblock %}

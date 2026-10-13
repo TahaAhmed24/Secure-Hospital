@@ -1,0 +1,213 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}Manage Devices{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+  <div class="row">
+    <div class="col-md-12">
+      <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2>Manage Your Devices</h2>
+        <a href="/private/" class="btn btn-secondary">Back to Dashboard</a>
+      </div>
+
+      <div class="alert alert-info">
+        <strong>About Device Management:</strong> Each device you log in from gets its own encryption key stored locally. You can revoke access for any device here. If you lose access to all devices, you'll need your recovery string to regain access.
+      </div>
+
+      <div id="loading" class="text-center py-5">
+        <div class="spinner-border text-primary" role="status">
+          <span class="visually-hidden">Loading...</span>
+        </div>
+        <p class="mt-3">Loading your devices...</p>
+      </div>
+
+      <div id="device-list" class="d-none">
+        <div class="row" id="devices-container">
+          <!-- Devices will be loaded here -->
+        </div>
+      </div>
+
+      <div id="error-message" class="alert alert-danger d-none">
+        <h5>Error</h5>
+        <p id="error-text"></p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  window.currentUserId = {{ user.id }};
+  window.currentUsername = "{{ user.username }}";
+  let currentDeviceId = null;
+
+document.addEventListener("DOMContentLoaded", function() {
+  // Get current device ID from IndexedDB
+  async function getCurrentDeviceId() {
+    return new Promise((resolve) => {
+      const indexedDB = window.indexedDB || window.mozIndexedDB || window.webkitIndexedDB || window.msIndexedDB || window.shimIndexedDB;
+      const open = indexedDB.open("HospitalDB", 2);  // Updated to version 2
+
+      open.onsuccess = function() {
+        const db = open.result;
+
+        if (!db.objectStoreNames.contains("KeyStore")) {
+          db.close();
+          resolve(null);
+          return;
+        }
+
+        const tx = db.transaction("KeyStore", "readonly");
+        const store = tx.objectStore("KeyStore");
+
+        const userId = window.currentUserId;
+        const request = store.get(`device_id_${userId}`);
+
+        request.onsuccess = function() {
+          db.close();
+          resolve(request.result ? request.result.value : null);
+        };
+
+        request.onerror = function() {
+          db.close();
+          resolve(null);
+        };
+      };
+
+      open.onerror = function() {
+        resolve(null);
+      };
+    });
+  }
+
+  // Load devices from server
+  async function loadDevices() {
+    try {
+      currentDeviceId = await getCurrentDeviceId();
+
+      const response = await fetch('/records/api/device/list/');
+      if (!response.ok) {
+        throw new Error('Failed to load devices');
+      }
+
+      const data = await response.json();
+      const devices = data.devices;
+
+      if (devices.length === 0) {
+        document.getElementById('loading').innerHTML = '<p class="text-muted">No devices found.</p>';
+        return;
+      }
+
+      const container = document.getElementById('devices-container');
+      container.innerHTML = '';
+
+      devices.forEach(device => {
+        const isCurrentDevice = device.device_id === currentDeviceId;
+        const card = createDeviceCard(device, isCurrentDevice);
+        container.appendChild(card);
+      });
+
+      document.getElementById('loading').classList.add('d-none');
+      document.getElementById('device-list').classList.remove('d-none');
+
+    } catch (error) {
+      console.error('Failed to load devices:', error);
+      document.getElementById('loading').classList.add('d-none');
+      document.getElementById('error-message').classList.remove('d-none');
+      document.getElementById('error-text').innerText = error.message;
+    }
+  }
+
+  function createDeviceCard(device, isCurrent) {
+    const col = document.createElement('div');
+    col.className = 'col-md-6 mb-3';
+
+    const lastUsed = new Date(device.last_used).toLocaleString();
+    const createdAt = new Date(device.created_at).toLocaleString();
+
+    col.innerHTML = `
+      <div class="card ${isCurrent ? 'border-primary' : ''}">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <h5 class="mb-0">
+            ${escapeHtml(device.friendly_name)}
+            ${isCurrent ? '<span class="badge bg-primary ms-2">Current Device</span>' : ''}
+          </h5>
+          ${!isCurrent ? `<button class="btn btn-sm btn-danger" onclick="revokeDevice('${device.device_id}', '${escapeHtml(device.friendly_name)}')">Revoke</button>` : ''}
+        </div>
+        <div class="card-body">
+          <p class="card-text mb-2">
+            <strong>Last Used:</strong> ${lastUsed}
+          </p>
+          <p class="card-text mb-2">
+            <strong>Added:</strong> ${createdAt}
+          </p>
+          <p class="card-text mb-2">
+            <strong>IP Address:</strong> ${escapeHtml(device.ip_address)}
+          </p>
+          <p class="card-text mb-0">
+            <strong>Browser:</strong> <small class="text-muted">${escapeHtml(device.user_agent)}</small>
+          </p>
+        </div>
+      </div>
+    `;
+
+    return col;
+  }
+
+  window.revokeDevice = async function(deviceId, deviceName) {
+    if (!confirm(`Are you sure you want to revoke access for "${deviceName}"?\n\nThis device will no longer be able to decrypt your data.`)) {
+      return;
+    }
+
+    try {
+      const response = await loggedFetch('/records/api/device/revoke/', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRFToken': getCsrfToken()
+        },
+        body: JSON.stringify({
+          device_id: deviceId
+        })
+      }, {
+        logger: securityLogger,
+        action: 'revokeDevice',
+        username: window.currentUsername,
+        data: {
+          deviceId: deviceId,
+          deviceName: deviceName
+        },
+        logOnSuccess: true,
+        logOnError: true
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to revoke device');
+      }
+
+      // Reload devices
+      location.reload();
+
+    } catch (error) {
+      alert('Failed to revoke device: ' + error.message);
+    }
+  };
+
+  function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  function getCsrfToken() {
+    return document.querySelector('[name=csrfmiddlewaretoken]')?.value ||
+           document.cookie.split('; ').find(row => row.startsWith('csrftoken='))?.split('=')[1] || '';
+  }
+
+  // Load devices on page load
+  loadDevices();
+});
+</script>
+{% endblock %}

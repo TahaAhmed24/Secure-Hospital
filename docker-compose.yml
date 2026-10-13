@@ -1,0 +1,110 @@
+services:
+  db:
+    image: mysql:8.0
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword  # Set root password
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql  # Add this line
+    networks:
+      - hospital_network
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "mysqladmin",
+          "ping",
+          "-h",
+          "localhost",
+          "-u",
+          "root",
+          "-prootpassword",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  hospital:
+    build:
+      context: .
+      dockerfile: hospital/Dockerfile
+    container_name: hospital_django
+    restart: always
+    command: sh /app/entrypoint.sh
+    volumes:
+      - ./hospital:/app
+      - static_volume:/app/static
+      - media_volume:/app/media
+      - shared_keys:/shared_keys  # Add shared volume for keys
+    expose:
+      - "8000"
+    env_file:
+      - ./hospital/.env
+    environment:
+      - MYSQL_HOST=db
+      - DEBUG=True
+    depends_on:
+      db:
+        condition: service_healthy
+      securitylogger:
+        condition: service_started
+    networks:
+      - hospital_network
+
+  securitylogger:
+    build:
+      context: .
+      dockerfile: SecurityLogger/Dockerfile
+    container_name: securitylogger_django
+    restart: always
+    command: sh /app/entrypoint.sh
+    volumes:
+      - ./SecurityLogger:/app
+      - static_volume:/app/static
+      - media_volume:/app/media
+      - hsm_tokens:/var/lib/softhsm/tokens  # Persist HSM tokens
+      - shared_keys:/shared_keys  # Share keys with hospital
+    expose:
+      - "8000"
+    env_file:
+      - ./SecurityLogger/.env
+    environment:
+      - MYSQL_HOST=db
+      - DEBUG=True
+      - SOFTHSM2_CONF=/app/softhsm2.conf
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - hospital_network
+
+  nginx:
+    image: nginx:alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+      - "9000:9000"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - static_volume:/app/static:ro
+      - media_volume:/app/media:ro
+      - ./pki:/etc/nginx/ssl:ro
+      - shared_keys:/shared_keys:ro  # Add this line!
+    depends_on:
+      - hospital
+      - securitylogger
+    networks:
+      - hospital_network
+
+volumes:
+  mysql_data:
+  static_volume:
+  media_volume:
+  hsm_tokens:  # New volume to persist HSM tokens across restarts
+  shared_keys:  # New volume to share public keys between containers
+
+networks:
+  hospital_network:
+    driver: bridge

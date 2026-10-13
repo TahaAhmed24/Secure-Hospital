@@ -1,0 +1,347 @@
+{% extends "base.html" %}
+
+{% block title %}Login{% endblock %}
+
+{% block content %}
+<div class="row justify-content-md-center">
+  <div class="col col-lg-4">
+    <div class="card shadow bg-light">
+      <h4 class="card-header">Login</h4>
+      <form id="login-form" class="card-body" method="post" action="{% url 'login' %}">
+        {% csrf_token %}
+
+        <p class="card-text">Don&apos;t have an account? <a href="{% url 'register' %}">Register</a></p>
+
+        {% if form.errors %}
+        <p class="text-danger">Your username and password didn't match. Please try again.</p>
+        {% endif %}
+
+        {% if next %}
+        {% if user.is_authenticated %}
+        <p class="text-danger">Your account doesn't have access to this page. To proceed,
+          please login with an account that has access.</p>
+        {% else %}
+        <p>Please login to see this page.</p>
+        {% endif %}
+        {% endif %}
+
+        {{ form.username }}
+
+        <div class="mb-3">
+          <button id="login-btn" type="submit" class="btn btn-primary mt-3">Login</button>
+        </div>
+
+        <input type="hidden" name="next" value="{{ next }}">
+      </form>
+
+    </div>
+  </div>
+</div>
+<script>
+  document.addEventListener('DOMContentLoaded', () => {
+    const form = document.getElementById("login-form");
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault(); // stop normal submission
+      await startLogin();
+    });
+
+  });
+
+  const params = new URLSearchParams(document.location.search);
+  const next = params.get("next");
+
+  async function startLogin() {
+    const formData = new FormData(document.getElementById("login-form"));
+    const username = formData.get("username")?.trim();
+
+    // create temporary token valid for 5 minutes and stored in cache
+    let token;
+    try {
+        const res = await loggedFetch("{% url 'webauth:begin_login' %}", {
+            method: "POST",
+            body: formData
+        }, {
+            logger: securityLogger,
+            action: "loginBegin",
+            username: username,
+            logOnSuccess: false,  // Only log failures at this stage
+            logOnError: true
+        });
+
+        if (!res.ok) {
+            // Log failed attempt with full metadata
+            await securityLogger.log({
+                action: "loginBeginFailed",
+                username: username,
+                response_status: res.status,
+                timestamp: new Date().toISOString()
+            });
+            const errMsg = await res.json().catch(() => ({}));
+            alert("Login failed: " + (errMsg.error || "Bad request"));
+            return;
+        }
+
+        const data = await res.json();
+        token = data.token;
+        if (!token) throw new Error("No token returned from server");
+
+    } catch (err) {
+        console.error("Error during begin_login:", err);
+        alert("Login failed. Please try again.");
+        return;
+    }
+
+    try {
+      const challengeRes = await loggedFetch("{% url 'webauth:webauthn_challenge' %}?token=" + token, {}, {
+          logger: securityLogger,
+          action: "loginChallenge",
+          username: username,
+          logOnSuccess: false,
+          logOnError: true
+      });
+      const challengeData = await challengeRes.json();
+
+      challengeData.publicKey.challenge = base64url_to_buffer(challengeData.publicKey.challenge);
+      challengeData.publicKey.allowCredentials = challengeData.publicKey.allowCredentials.map(c => ({
+        ...c,
+        id: base64url_to_buffer(c.id),
+      }));
+      // navigator.credentials.get returns ArrayBuffers for rawId, etc.
+      const assertion = await navigator.credentials.get({ publicKey: challengeData.publicKey });
+
+      // Convert to JSON-serializable object
+      const payload = {
+        id: assertion.id,
+        rawId: buffer_to_base64url(assertion.rawId),
+        response: {
+          authenticatorData: buffer_to_base64url(assertion.response.authenticatorData),
+          clientDataJSON: buffer_to_base64url(assertion.response.clientDataJSON),
+          signature: buffer_to_base64url(assertion.response.signature),
+          userHandle: assertion.response.userHandle
+            ? buffer_to_base64url(assertion.response.userHandle)
+            : null,
+        },
+        type: assertion.type,
+        token: token
+      };
+
+      // send the payload for verification
+      const verifyRes = await loggedFetch("{% url 'webauth:webauthn_verify' %}", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRFToken": getCookie("csrftoken"),
+        },
+        body: JSON.stringify(payload)
+      }, {
+          logger: securityLogger,
+          action: "loginVerify",
+          username: username,
+          logOnSuccess: true,  // Log all verification attempts
+          logOnError: true
+      });
+
+      if (verifyRes.status === 403) {
+          const data = await verifyRes.json().catch(() => ({}));
+          if (data.renewal_required) {
+              window.location.href = "/webauth/certificates/renew/?token=" + encodeURIComponent(data.renewal_token);
+              return;
+          }
+      }
+
+      if (!verifyRes.ok) {
+          alert("Authentication failed");
+          return;
+      }
+
+      // Otherwise, check E2EE setup status
+      await checkE2EEStatus();
+    } catch (err) {
+        console.error("Error during WebAuthn challenge:", err);
+        alert("Login failed. Please try again.");
+    }
+  }
+
+  async function checkE2EEStatus() {
+    try {
+      // Check server-side status
+      const statusRes = await fetch('/records/api/e2ee/status/');
+      const status = await statusRes.json();
+
+      // If user doesn't have keys, redirect to key setup
+      if (!status.has_keys) {
+        window.location.href = '/setup/keys/';
+        return;
+      }
+
+      // Get current user ID for user-specific device key lookup
+      const keysRes = await fetch('/records/api/keys/me/');
+      const keysData = await keysRes.json();
+      const userId = keysData.user_id;
+
+      // User has keys, check if this device is registered locally (user-specific)
+      const deviceId = await getDeviceIdFromIndexedDB(userId);
+
+      if (!deviceId) {
+        // New device - redirect to device setup
+        window.location.href = '/setup/device/';
+        return;
+      }
+
+      // Device exists locally, verify with server (check if not revoked)
+      const isDeviceValid = await verifyDeviceWithServer(deviceId);
+
+      if (!isDeviceValid) {
+        // Device was revoked - clear local storage and redirect to device setup
+        await clearDeviceCredentials(userId);
+        window.location.href = '/setup/device/?revoked=true';
+        return;
+      }
+
+      // All set up - redirect to main app
+      window.location.href = '/private/';
+
+    } catch (error) {
+      console.error('E2EE status check failed:', error);
+      // On error, redirect to home
+      window.location.href = '/';
+    }
+  }
+
+  /**
+   * Get device ID from IndexedDB for a specific user
+   * @param {number} userId - The user ID
+   * @returns {Promise<string|null>} The device ID or null if not found
+   */
+  function getDeviceIdFromIndexedDB(userId) {
+    return new Promise((resolve) => {
+      try {
+        const indexedDB = window.indexedDB || window.mozIndexedDB || window.webkitIndexedDB || window.msIndexedDB || window.shimIndexedDB;
+        // Use version 2 to match session.js
+        const open = indexedDB.open("HospitalDB", 2);
+
+        open.onsuccess = function() {
+          const db = open.result;
+
+          // Check if KeyStore exists
+          if (!db.objectStoreNames.contains("KeyStore")) {
+            db.close();
+            resolve(null);
+            return;
+          }
+
+          const tx = db.transaction("KeyStore", "readonly");
+          const store = tx.objectStore("KeyStore");
+
+          // Get user-specific device_id
+          const request = store.get(`device_id_${userId}`);
+
+          request.onsuccess = function() {
+            db.close();
+            resolve(request.result ? request.result.value : null);
+          };
+
+          request.onerror = function() {
+            db.close();
+            resolve(null);
+          };
+        };
+
+        open.onerror = function() {
+          resolve(null);
+        };
+      } catch (error) {
+        console.error('IndexedDB check failed:', error);
+        resolve(null);
+      }
+    });
+  }
+
+  async function verifyDeviceWithServer(deviceId) {
+    try {
+      const response = await fetch(`/records/api/device/keys/?device_id=${deviceId}`);
+
+      // If device exists and is valid, server returns 200
+      // If device was revoked, server returns 404
+      return response.ok;
+    } catch (error) {
+      console.error('Device verification failed:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Clear device credentials from IndexedDB for a specific user
+   * @param {number} userId - The user ID
+   * @returns {Promise<void>}
+   */
+  function clearDeviceCredentials(userId) {
+    return new Promise((resolve) => {
+      try {
+        const indexedDB = window.indexedDB || window.mozIndexedDB || window.webkitIndexedDB || window.msIndexedDB || window.shimIndexedDB;
+        // Use version 2 to match session.js
+        const open = indexedDB.open("HospitalDB", 2);
+
+        open.onsuccess = function() {
+          const db = open.result;
+
+          if (!db.objectStoreNames.contains("KeyStore")) {
+            db.close();
+            resolve();
+            return;
+          }
+
+          const tx = db.transaction("KeyStore", "readwrite");
+          const store = tx.objectStore("KeyStore");
+
+          // Clear user-specific device credentials
+          store.delete(`device_id_${userId}`);
+          store.delete(`device_key_${userId}`);
+
+          tx.oncomplete = function() {
+            db.close();
+            resolve();
+          };
+
+          tx.onerror = function() {
+            db.close();
+            resolve();
+          };
+        };
+
+        open.onerror = function() {
+          resolve();
+        };
+      } catch (error) {
+        console.error('Failed to clear credentials:', error);
+        resolve();
+      }
+    });
+  }
+
+  // Utility functions (same as your existing code)
+  function base64url_to_buffer(base64url) {
+    const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes.buffer;
+  }
+
+  function buffer_to_base64url(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+  }
+
+  function getCookie(name) {
+    const cookies = document.cookie.split(';').map(c => c.trim());
+    for (const cookie of cookies) {
+      if (cookie.startsWith(name + '=')) return decodeURIComponent(cookie.slice(name.length + 1));
+    }
+    return null;
+  }
+</script>
+
+{% endblock %}

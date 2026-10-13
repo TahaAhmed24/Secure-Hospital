@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  {% load static %}
+  <link href="{% static 'bootstrap.min.css' %}" rel="stylesheet"
+        crossorigin="anonymous">
+
+  <title>{% block title %}{% endblock %} | Hospi+</title>
+  <script type="module">
+  import { StandardLogger } from "{% static 'logs/logger_standard.js' %}";
+  import { SecurityLogger } from "{% static 'logs/logger_security.js' %}";
+  import { loggedFetch, createLoggedFetch } from "{% static 'logs/loggedFetch.js' %}";
+
+  // Initialize standard logger
+  window.standardLogger = new StandardLogger("/logs/standard", "/shared_keys/public_key.pem");
+
+  // Initialize security logger
+  window.securityLogger = new SecurityLogger("/logs/security", "/shared_keys/server_public_key.pem");
+
+  // Make loggedFetch available globally
+  window.loggedFetch = loggedFetch;
+  window.createLoggedFetch = createLoggedFetch;
+
+  console.log("Loggers initialized and ready");
+</script>
+</head>
+<body>
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark shadow">
+  <div class="container-fluid">
+    <a class="navbar-brand" href="#">Hospi+</a>
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse"
+            data-bs-target="#navbarSupportedContent"
+            aria-controls="navbarSupportedContent" aria-expanded="false"
+            aria-label="Toggle navigation">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+    <div class="collapse navbar-collapse" id="navbarSupportedContent">
+      <div class="navbar-nav">
+        <!--<a class="nav-link" href="{% url 'home' %}">Home</a>-->
+        {% if user.is_authenticated %}
+          <a class="nav-link" href="{% url 'private' %}">Dashboard</a>
+
+          {% if request.session.role == 'patient' %}
+            <a class="nav-link" href="{% url 'patient_doctors' %}">My Doctors</a>
+            <a class="nav-link" href="{% url 'medical_records' %}">Medical Records</a>
+          {% elif request.session.role == 'doctor' %}
+            <a class="nav-link" href="{% url 'doctor_patients' %}">My Patients</a>
+            <a class="nav-link" href="{% url 'medical_records' %}">Patient Records</a>
+          {% endif %}
+
+          <a class="nav-link" href="{% url 'devices' %}">Devices</a>
+          <a class="nav-link" href="{% url 'webauth:devices' %}">Security Keys</a>
+          <a class="nav-link" href="{% url 'profile' %}">Profile</a>
+
+          <form id="logout-form" action="{% url 'logout' %}" method="post" class="d-flex m-0 p-0">
+            {% csrf_token %}
+            <button type="submit" class="nav-link btn btn-link p-0 m-0" style="height:100%; border:none;">Logout</button>
+          </form>
+        {% else %}
+          <a class="nav-link" href="{% url 'login' %}">Login</a>
+          <a class="nav-link" href="{% url 'register' %}">Register</a>
+        {% endif %}
+
+
+      </div>
+    </div>
+  </div>
+</nav>
+<div class="container py-5">
+  {% block content %}{% endblock %}
+</div>
+<script src="{% static 'bootstrap.bundle.min.js' %}"
+        crossorigin="anonymous"></script>
+<script>
+  document.addEventListener("DOMContentLoaded", () => {
+    // Wrap the async code in a function
+
+      const logoutForm = document.getElementById("logout-form");
+      if (!logoutForm) return;
+
+      logoutForm.addEventListener("submit", async (e) => {
+        e.preventDefault(); // stop immediate navigation
+
+        try {
+          await standardLogger.log({
+            action: 'logout',
+            username: "{{ user.username }}",
+            user_agent: navigator.userAgent,
+            timestamp: new Date().toISOString()
+          });
+        } catch (err) {
+          console.error("Logout logging failed:", err);
+        }
+
+        // Submit the form after logging completes
+        logoutForm.submit();
+      });
+  });
+</script>
+</body>
+</html>

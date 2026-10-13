@@ -1,0 +1,774 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}Medical Record View{% endblock %}
+
+{% block content %}
+<script src="{% static 'crypto.js' %}"></script>
+<script src="{% static 'fileOperations.js' %}"></script>
+<script src="{% static 'session.js' %}"></script>
+
+<div class="container-fluid mt-4">
+  <!-- Loading State -->
+  <div id="loadingState" class="text-center py-5">
+    <div class="spinner-border text-primary" role="status"></div>
+    <p class="mt-2">Loading medical record...</p>
+  </div>
+
+  <!-- Error State -->
+  <div id="errorState" class="alert alert-danger d-none"></div>
+
+  <!-- Main Content -->
+  <div id="mainContent" class="d-none">
+    <div class="row">
+      <!-- Main Content Area (Left) -->
+      <div class="col-lg-8">
+        <!-- Header with File Info -->
+        <div class="card mb-3">
+          <div class="card-body">
+            <div class="d-flex justify-content-between align-items-start mb-3">
+              <div class="flex-grow-1">
+                <h3 id="fileName" class="mb-2"></h3>
+                <div class="text-muted mb-2">
+                  <small>
+                    <i class="bi bi-file-earmark-text"></i> Version <span id="versionNumber"></span> •
+                    <i class="bi bi-person"></i> <span id="editorName"></span> •
+                    <i class="bi bi-calendar"></i> <span id="editDate"></span> •
+                    <i class="bi bi-hdd"></i> <span id="fileSize"></span>
+                  </small>
+                </div>
+                <div id="statusBadge"></div>
+              </div>
+              <button class="btn btn-outline-secondary btn-sm" onclick="window.location.href='/medical-records/'">
+                <i class="bi bi-arrow-left"></i> Back
+              </button>
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="d-flex gap-2 flex-wrap">
+              <!-- Edit/Save/Cancel Buttons -->
+              <button id="editBtn" class="btn btn-primary btn-sm" onclick="enableEdit()">
+                <i class="bi bi-pencil"></i> <span id="editBtnText">Edit</span>
+              </button>
+              <button id="saveBtn" class="btn btn-success btn-sm d-none" onclick="saveVersion()">
+                <i class="bi bi-check-lg"></i> <span id="saveBtnText">Save</span>
+              </button>
+              <button id="cancelBtn" class="btn btn-secondary btn-sm d-none" onclick="cancelEdit()">
+                <i class="bi bi-x-lg"></i> Cancel
+              </button>
+
+              <!-- Download Button -->
+              <button id="downloadBtn" class="btn btn-info btn-sm" onclick="downloadFile()">
+                <i class="bi bi-download"></i> Download
+              </button>
+
+              <!-- Delete Button (Patient only) -->
+              <button id="deleteBtn" class="btn btn-danger btn-sm d-none" onclick="deleteFile()">
+                <i class="bi bi-trash"></i> Delete
+              </button>
+
+              <!-- Request Delete Button (Doctor only) -->
+              <button id="requestDeleteBtn" class="btn btn-warning btn-sm d-none" onclick="requestDeletion()">
+                <i class="bi bi-trash"></i> Request Delete
+              </button>
+            </div>
+            <div id="saveStatus" class="mt-2"></div>
+          </div>
+        </div>
+
+        <!-- Signature Chain Verification Status -->
+        <div id="verificationStatus"></div>
+
+        <!-- Content Viewer/Editor -->
+        <div class="card">
+          <div class="card-header">
+            <h5 class="mb-0">Content</h5>
+          </div>
+          <div class="card-body">
+            <textarea
+              id="fileContent"
+              class="form-control font-monospace"
+              rows="20"
+              disabled
+              style="resize: vertical;"
+            ></textarea>
+          </div>
+        </div>
+      </div>
+
+      <!-- Version History Sidebar (Right) -->
+      <div class="col-lg-4">
+        <div class="card sticky-top" style="top: 20px;">
+          <div class="card-header bg-secondary text-white">
+            <h5 class="mb-0"><i class="bi bi-clock-history"></i> Version History</h5>
+          </div>
+          <div class="card-body p-0">
+            <div id="versionHistoryLoading" class="text-center py-3">
+              <div class="spinner-border spinner-border-sm" role="status"></div>
+              <p class="mb-0 mt-2"><small>Loading versions...</small></p>
+            </div>
+            <div id="versionHistoryList" class="d-none" style="max-height: 70vh; overflow-y: auto;"></div>
+            <div id="noVersions" class="text-center text-muted py-3 d-none">
+              <small>No previous versions</small>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  // Global state
+  let fileData = null;
+  let latestVersion = null;
+  let grantData = null;
+  let symmetricKey = null;
+  let decryptedFilename = '';
+  let originalContent = '';
+  let previousSignature = '';  // For signature chaining
+  let isPatient = false;
+  let verificationResults = null;  // Signature chain verification results
+
+  const fileId = {{ file_id }};
+  const versionId = {{ version_id|default:"null" }};  // null if not specified
+  const currentUsername = '{{ request.user.username }}';
+  // Initialize
+  async function init() {
+    try {
+      await session.autoUnlockFromDevice();
+
+      const userRole = '{{ request.session.role }}';
+      isPatient = userRole === 'patient';
+
+      // Load the file
+      await loadFile();
+
+    } catch (error) {
+      console.error('Initialization error:', error);
+      await standardLogger.logMessage(`Initialization failed for file ${fileId}: ${error.message}`, 'error');
+      showError('Failed to initialize: ' + error.message);
+    }
+  }
+
+  // Load and decrypt file
+  async function loadFile() {
+    try {
+      document.getElementById('loadingState').classList.remove('d-none');
+      document.getElementById('mainContent').classList.add('d-none');
+
+      // Fetch file data (includes file metadata, latest_version, grant, versions)
+      const response = await fetch(`/records/api/files/${fileId}`);
+      if (!response.ok) {
+        throw new Error('File not found or access denied');
+      }
+
+      const data = await response.json();
+      fileData = data.file;  // File metadata only
+
+      // If versionId is specified, load that specific version; otherwise load latest
+      let versionToDisplay;
+      let grantToUse;
+
+      if (versionId) {
+        // Find the specific version from the versions list
+        const specificVersion = data.versions.find(v => v.id === versionId);
+        if (!specificVersion) {
+          throw new Error('Requested version not found');
+        }
+
+        // For specific versions, we need to fetch the full version data
+        // (the versions list only has metadata, not encrypted_content)
+        const versionResponse = await fetch(`/records/api/files/${fileId}?version=${versionId}`);
+        if (!versionResponse.ok) {
+          throw new Error('Failed to load specific version');
+        }
+        const versionData = await versionResponse.json();
+        versionToDisplay = versionData.latest_version;
+        grantToUse = versionData.grant;
+      } else {
+        // Load latest version
+        versionToDisplay = data.latest_version;
+        grantToUse = data.grant;
+      }
+
+      latestVersion = versionToDisplay;
+      grantData = grantToUse;
+
+      // Store signature for chaining in next version
+      previousSignature = latestVersion.signature;
+
+      // Decrypt symmetric key
+      symmetricKey = await E2EECrypto.decryptSymmetricKey(
+        grantData.encrypted_symmetric_key,
+        session.getEncryptionPrivateKey()
+      );
+
+      // Decrypt filename
+      decryptedFilename = await E2EECrypto.decryptText(
+        grantData.encrypted_filename,
+        symmetricKey
+      );
+
+      // Decrypt content
+      const encryptedContentBytes = Uint8Array.from(atob(latestVersion.encrypted_content), c => c.charCodeAt(0));
+      const decryptedContent = await E2EECrypto.decryptText(
+        btoa(String.fromCharCode(...encryptedContentBytes)),
+        symmetricKey
+      );
+      originalContent = decryptedContent;
+
+      // Display file info
+      document.getElementById('fileName').textContent = decryptedFilename;
+      document.getElementById('versionNumber').textContent = latestVersion.version_number;
+      document.getElementById('editorName').textContent = latestVersion.created_by;
+      document.getElementById('editDate').textContent = new Date(latestVersion.created_at).toLocaleString();
+      document.getElementById('fileSize').textContent = formatFileSize(latestVersion.size);
+      document.getElementById('fileContent').value = decryptedContent;
+
+      // Show status badge
+      displayStatusBadge(latestVersion.status);
+
+      // Set up buttons based on role
+      setupButtons();
+
+      // Verify signature chain first (so we have results for version history display)
+      await verifySignatureChain();
+
+      // Display version history (pass current version ID to highlight it)
+      displayVersionHistory(data.versions, latestVersion.id);
+
+      // Show main content
+      document.getElementById('loadingState').classList.add('d-none');
+      document.getElementById('mainContent').classList.remove('d-none');
+
+      // Log file view
+      await standardLogger.log({
+        action: 'viewSingleFile',
+        username: currentUsername,
+        fileId: fileId,
+        fileName: decryptedFilename,
+        versionNumber: latestVersion.version_number,
+        timestamp: new Date().toISOString()
+      });
+    } catch (error) {
+      console.error('Load file error:', error);
+      showError('Failed to load file: ' + error.message);
+    }
+  }
+
+  // Setup buttons based on user role and version status
+  async function setupButtons() {
+    const editBtn = document.getElementById('editBtn');
+    const saveBtn = document.getElementById('saveBtn');
+    const cancelBtn = document.getElementById('cancelBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const deleteBtn = document.getElementById('deleteBtn');
+    const requestDeleteBtn = document.getElementById('requestDeleteBtn');
+    const saveStatus = document.getElementById('saveStatus');
+
+    // Determine if this is the latest approved version
+    // We need to check all versions to find the latest approved one
+    const latestApprovedVersion = fileData ?
+      await fetch(`/records/api/files/${fileId}`)
+        .then(r => r.json())
+        .then(d => d.latest_version) : null;
+
+    const isLatestApproved = latestApprovedVersion && latestVersion.id === latestApprovedVersion.id && latestVersion.status === 'approved';
+    const isPendingVersion = latestVersion.status === 'pending';
+    const isHistoricalVersion = !isLatestApproved && !isPendingVersion;
+
+    // Download button is always visible
+    downloadBtn.classList.remove('d-none');
+
+    if (isPatient) {
+      // Hide approve/reject buttons by default
+      const approveBtn = document.getElementById('approveEditBtn');
+      const rejectBtn = document.getElementById('rejectEditBtn');
+      if (approveBtn) approveBtn.classList.add('d-none');
+      if (rejectBtn) rejectBtn.classList.add('d-none');
+
+      if (isPendingVersion) {
+        // Patient viewing a pending edit - show approve/reject buttons, hide others
+        editBtn.classList.add('d-none');
+        deleteBtn.classList.add('d-none');
+        requestDeleteBtn.classList.add('d-none');
+
+        // Create approve/reject buttons if they don't exist
+        if (!approveBtn) {
+          const newApproveBtn = document.createElement('button');
+          newApproveBtn.id = 'approveEditBtn';
+          newApproveBtn.className = 'btn btn-success me-2';
+          newApproveBtn.innerHTML = '<i class="bi bi-check-circle"></i> Approve Edit';
+          newApproveBtn.onclick = approveEdit;
+
+          const newRejectBtn = document.createElement('button');
+          newRejectBtn.id = 'rejectEditBtn';
+          newRejectBtn.className = 'btn btn-danger me-2';
+          newRejectBtn.innerHTML = '<i class="bi bi-x-circle"></i> Reject Edit';
+          newRejectBtn.onclick = rejectEdit;
+
+          const buttonContainer = editBtn.parentElement;
+          buttonContainer.insertBefore(newApproveBtn, downloadBtn);
+          buttonContainer.insertBefore(newRejectBtn, downloadBtn);
+        } else {
+          approveBtn.classList.remove('d-none');
+          rejectBtn.classList.remove('d-none');
+        }
+
+        saveStatus.innerHTML = '<div class="alert alert-warning mb-0"><i class="bi bi-exclamation-triangle"></i> Pending edit awaiting your approval</div>';
+      } else if (isLatestApproved) {
+        // Patient viewing latest approved version - show edit/delete buttons
+        editBtn.classList.remove('d-none');
+        document.getElementById('editBtnText').textContent = 'Edit';
+        document.getElementById('saveBtnText').textContent = 'Save';
+        deleteBtn.classList.remove('d-none');
+        requestDeleteBtn.classList.add('d-none');
+        saveStatus.innerHTML = '';
+      } else if (isHistoricalVersion) {
+        // Patient viewing historical version - view only
+        editBtn.classList.add('d-none');
+        deleteBtn.classList.add('d-none');
+        requestDeleteBtn.classList.add('d-none');
+        saveStatus.innerHTML = '<div class="alert alert-info mb-0"><i class="bi bi-clock-history"></i> Viewing historical version (read-only)</div>';
+      }
+    } else {
+      // Doctor
+      // Hide approve/reject buttons
+      const approveBtn = document.getElementById('approveEditBtn');
+      const rejectBtn = document.getElementById('rejectEditBtn');
+      if (approveBtn) approveBtn.classList.add('d-none');
+      if (rejectBtn) rejectBtn.classList.add('d-none');
+
+      // Hide save and cancel buttons
+      saveBtn.classList.add('d-none');
+      cancelBtn.classList.add('d-none');
+
+      if (isPendingVersion) {
+        // Doctor viewing their own pending edit - view only
+        editBtn.classList.add('d-none');
+        deleteBtn.classList.add('d-none');
+        requestDeleteBtn.classList.add('d-none');
+        saveStatus.innerHTML = '<div class="alert alert-info mb-0"><i class="bi bi-info-circle"></i> Your pending edit. Awaiting patient approval.</div>';
+      } else if (isLatestApproved) {
+        // Doctor viewing latest approved - can request edit
+        editBtn.classList.remove('d-none');
+        document.getElementById('editBtnText').textContent = 'Request Edit';
+        document.getElementById('saveBtnText').textContent = 'Submit for Approval';
+        deleteBtn.classList.add('d-none');
+        requestDeleteBtn.classList.remove('d-none');
+        saveStatus.innerHTML = '';
+      } else if (isHistoricalVersion) {
+        // Doctor viewing historical version - view only
+        editBtn.classList.add('d-none');
+        deleteBtn.classList.add('d-none');
+        requestDeleteBtn.classList.add('d-none');
+        saveStatus.innerHTML = '<div class="alert alert-info mb-0"><i class="bi bi-clock-history"></i> Viewing historical version (read-only)</div>';
+      }
+    }
+  }
+
+  // Format file size
+  function formatFileSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+  }
+
+  // Display status badge
+  function displayStatusBadge(status) {
+    const badge = document.getElementById('statusBadge');
+    let badgeClass = 'badge ';
+    let badgeText = '';
+
+    switch(status) {
+      case 'approved':
+        badgeClass += 'bg-success';
+        badgeText = 'Approved';
+        break;
+      case 'pending':
+        badgeClass += 'bg-warning text-dark';
+        badgeText = 'Pending Approval';
+        break;
+      case 'rejected':
+        badgeClass += 'bg-danger';
+        badgeText = 'Rejected';
+        break;
+    }
+
+    badge.innerHTML = `<span class="${badgeClass}">${badgeText}</span>`;
+  }
+
+  // Display version history
+  function displayVersionHistory(versions, currentVersionId) {
+    const loading = document.getElementById('versionHistoryLoading');
+    const listContainer = document.getElementById('versionHistoryList');
+    const noVersions = document.getElementById('noVersions');
+
+    loading.classList.add('d-none');
+
+    if (!versions || versions.length === 0) {
+      noVersions.classList.remove('d-none');
+      return;
+    }
+
+    let html = '<div class="list-group list-group-flush">';
+    versions.forEach(version => {
+      const statusBadgeClass = version.status === 'approved' ? 'success' :
+                               version.status === 'pending' ? 'warning' : 'danger';
+      const isCurrentVersion = version.id === currentVersionId;
+
+      // Get verification status for this version
+      let signatureIcon = '';
+      if (verificationResults && verificationResults.versions && verificationResults.versions[version.id]) {
+        const versionVerification = verificationResults.versions[version.id];
+        if (versionVerification.valid) {
+          signatureIcon = '<i class="bi bi-shield-check text-success ms-1" title="Signature verified"></i>';
+        } else {
+          signatureIcon = `<i class="bi bi-shield-exclamation text-danger ms-1" title="Signature invalid: ${versionVerification.error || 'Unknown error'}"></i>`;
+        }
+      }
+
+      html += `
+        <a href="/medical-records/${fileId}?version=${version.id}"
+           class="list-group-item list-group-item-action ${isCurrentVersion ? 'active' : ''}"
+           ${isCurrentVersion ? 'aria-current="true"' : ''}>
+          <div class="d-flex w-100 justify-content-between align-items-start">
+            <div class="flex-grow-1">
+              <h6 class="mb-1">
+                <i class="bi bi-file-text"></i> Version ${version.version_number}
+                ${signatureIcon}
+                ${isCurrentVersion ? '<span class="badge bg-light text-dark ms-1">Viewing</span>' : ''}
+              </h6>
+              <p class="mb-1 small">
+                <i class="bi bi-person"></i> ${version.editor}<br>
+                <i class="bi bi-calendar"></i> ${new Date(version.created_at).toLocaleString()}<br>
+                <i class="bi bi-hdd"></i> ${formatFileSize(version.size)}
+              </p>
+              <span class="badge bg-${statusBadgeClass}">${version.status}</span>
+            </div>
+          </div>
+        </a>
+      `;
+    });
+    html += '</div>';
+
+    listContainer.innerHTML = html;
+    listContainer.classList.remove('d-none');
+  }
+
+  // Verify signature chain
+  async function verifySignatureChain() {
+    try {
+      const response = await fetch(`/records/api/files/${fileId}/verify/`);
+      if (!response.ok) {
+        throw new Error('Failed to verify signature chain');
+        await standardLogger.logMessage(`Signature verification failed for file ${fileId}`, 'warn');
+      }
+
+      verificationResults = await response.json();
+      displayVerificationStatus(verificationResults);
+
+    } catch (error) {
+      console.error('Signature verification error:', error);
+      await standardLogger.logMessage(`Signature verification error for file ${fileId}: ${error.message}`, 'error');
+      // Display warning but don't block the UI
+      displayVerificationStatus({ valid: false, error: error.message });
+    }
+  }
+
+  // Display signature chain verification status
+  function displayVerificationStatus(results) {
+    const container = document.getElementById('verificationStatus');
+    if (!container) return;
+
+    let html = '';
+
+    if (results.valid) {
+      html = `
+        <div class="alert alert-success d-flex align-items-center mb-3" role="alert">
+          <i class="bi bi-shield-check fs-4 me-2"></i>
+          <div>
+            <strong>Signature Chain Verified</strong><br>
+            <small>All version signatures are valid. The document history is authentic and has not been tampered with.</small>
+          </div>
+        </div>
+      `;
+    } else {
+      const errorMsg = results.broken_at
+        ? `Signature chain is broken at version ${results.broken_at}`
+        : (results.error || 'Signature verification failed');
+
+      html = `
+        <div class="alert alert-danger d-flex align-items-center mb-3" role="alert">
+          <i class="bi bi-shield-exclamation fs-4 me-2"></i>
+          <div>
+            <strong>Signature Verification Failed</strong><br>
+            <small>${errorMsg}. This may indicate tampering or data corruption.</small>
+          </div>
+        </div>
+      `;
+    }
+
+    container.innerHTML = html;
+  }
+
+  // Enable edit mode
+  window.enableEdit = async function() {
+    document.getElementById('fileContent').disabled = false;
+    document.getElementById('fileContent').focus();
+    document.getElementById('editBtn').classList.add('d-none');
+    document.getElementById('saveBtn').classList.remove('d-none');
+    document.getElementById('cancelBtn').classList.remove('d-none');
+    document.getElementById('downloadBtn').disabled = true;
+    document.getElementById('deleteBtn').disabled = true;
+    document.getElementById('requestDeleteBtn').disabled = true;
+
+    // Log entering edit mode
+    await standardLogger.log({
+      action: 'enterEditMode',
+      username: currentUsername,
+      fileId: fileId,
+      fileName: decryptedFilename,
+      versionNumber: latestVersion.version_number,
+      timestamp: new Date().toISOString()
+    });
+  };
+
+  // Cancel edit mode
+  window.cancelEdit = function() {
+    document.getElementById('fileContent').value = originalContent;
+    document.getElementById('fileContent').disabled = true;
+    document.getElementById('editBtn').classList.remove('d-none');
+    document.getElementById('saveBtn').classList.add('d-none');
+    document.getElementById('cancelBtn').classList.add('d-none');
+    document.getElementById('downloadBtn').disabled = false;
+    document.getElementById('deleteBtn').disabled = false;
+    document.getElementById('requestDeleteBtn').disabled = false;
+  };
+
+  // Save new version
+  window.saveVersion = async function() {
+    try {
+      const newContent = document.getElementById('fileContent').value;
+
+      if (newContent === originalContent) {
+        alert('No changes detected');
+        return;
+      }
+
+      // Show saving status
+      const saveStatus = document.getElementById('saveStatus');
+      saveStatus.innerHTML = '<div class="alert alert-info mb-0"><div class="spinner-border spinner-border-sm me-2"></div>Saving version...</div>';
+
+      // Use VersionOperations class to create new version
+      await VersionOperations.createVersion(fileId, newContent, decryptedFilename, previousSignature);
+
+      // Log version creation
+      await standardLogger.log({
+        action: 'createVersion',
+        username: currentUsername,
+        fileId: fileId,
+        fileName: decryptedFilename,
+        isPatient: isPatient,
+        status: isPatient ? 'approved' : 'pending',
+        timestamp: new Date().toISOString()
+      });
+
+      // Show success message
+      saveStatus.innerHTML = `<div class="alert alert-success mb-0">
+        ${isPatient ? 'Version saved successfully! Redirecting...' : 'Edit request submitted for patient approval. Redirecting...'}
+      </div>`;
+
+      // Redirect to the file page
+      setTimeout(() => {
+        window.location.href = `/medical-records/${fileId}`;
+      }, 1500);
+
+    } catch (error) {
+      console.error('Save version error:', error);
+      await standardLogger.logMessage(`Failed to save version for file ${fileId}: ${error.message}`, 'error');
+      document.getElementById('saveStatus').innerHTML = `<div class="alert alert-danger mb-0">Failed to save: ${error.message}</div>`;
+    }
+  };
+
+  // Download file
+  window.downloadFile = async function() {
+    try {
+      // Add version number to filename
+      const versionedFilename = addVersionToFilename(decryptedFilename, latestVersion.version_number);
+
+      // Log download
+      await standardLogger.log({
+        action: 'downloadFile',
+        username: currentUsername,
+        fileId: fileId,
+        fileName: decryptedFilename,
+        versionNumber: latestVersion.version_number,
+        timestamp: new Date().toISOString()
+      });
+
+      // Create blob from decrypted content
+      const blob = new Blob([originalContent], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = versionedFilename;
+      a.click();
+      URL.revokeObjectURL(url);
+
+    } catch (error) {
+      alert(`Download failed: ${error.message}`);
+      await standardLogger.logMessage(`Failed download for file ${fileId}: ${error.message}`, 'error');
+    }
+  };
+
+  // Helper function to add version number to filename
+  function addVersionToFilename(filename, version) {
+    const lastDotIndex = filename.lastIndexOf('.');
+    if (lastDotIndex === -1) {
+      // No extension
+      return `${filename}_v${version}`;
+    } else {
+      // Has extension
+      const name = filename.substring(0, lastDotIndex);
+      const extension = filename.substring(lastDotIndex);
+      return `${name}_v${version}${extension}`;
+    }
+  }
+
+  // Delete file (patient only)
+  window.deleteFile = async function() {
+    if (!confirm(`Are you sure you want to delete "${decryptedFilename}"? This cannot be undone.`)) {
+      return;
+    }
+
+    try {
+      await VersionOperations.deleteFile(fileId);
+      // Log deletion (security-critical action)
+      await securityLogger.log({
+        action: 'deleteFile',
+        username: currentUsername,
+        fileId: fileId,
+        fileName: decryptedFilename,
+        timestamp: new Date().toISOString()
+      });
+      alert('File deleted successfully');
+      window.location.href = '/medical-records/';
+    } catch (error) {
+      alert(`Failed to delete: ${error.message}`);
+      await standardLogger.logMessage(`Failed deletion for file ${fileId}: ${error.message}`, 'error');
+    }
+  };
+
+  // Approve pending edit (patient only)
+  window.approveEdit = async function() {
+    if (!confirm('Approve this edit? This will make it the latest version and reject all other pending edits.')) {
+      return;
+    }
+
+    try {
+      await VersionOperations.approveVersion(fileId, latestVersion.id);
+      // Log approval (security-critical action - changes access)
+      await securityLogger.log({
+        action: 'approveEdit',
+        username: currentUsername,
+        editorUsername: latestVersion.created_by,
+        fileId: fileId,
+        fileName: decryptedFilename,
+        versionId: latestVersion.id,
+        timestamp: new Date().toISOString()
+      });
+      alert('Edit approved successfully! Redirecting to latest version...');
+      window.location.href = `/medical-records/${fileId}`;
+    } catch (error) {
+      alert(`Failed to approve: ${error.message}`);
+      await standardLogger.logMessage(`Failed approval for file ${fileId}: ${error.message}`, 'error');
+    }
+  };
+
+  // Reject pending edit (patient only)
+  window.rejectEdit = async function() {
+    if (!confirm('Reject this edit? This cannot be undone.')) {
+      return;
+    }
+
+    try {
+      const data = await VersionOperations.rejectVersion(fileId, latestVersion.id);
+      // Log rejection (security-critical action)
+      await securityLogger.log({
+        action: 'declineEdit',
+        username: currentUsername,
+        editorUsername: latestVersion.created_by,
+        fileId: fileId,
+        fileName: decryptedFilename,
+        versionId: latestVersion.id,
+        reason: 'Rejected by patient',
+        timestamp: new Date().toISOString()
+      });
+      alert(data.message || 'Edit rejected successfully!');
+      window.location.href = `/medical-records/${fileId}`;
+    } catch (error) {
+      alert(`Failed to reject: ${error.message}`);
+      await standardLogger.logMessage(`Failed rejection for file ${fileId}: ${error.message}`, 'error');
+    }
+  };
+
+  // Request deletion (doctor only)
+  window.requestDeletion = async function() {
+    if (!confirm(`Request deletion of "${decryptedFilename}"? The patient will need to approve.`)) {
+      return;
+    }
+
+    try {
+      await VersionOperations.requestDeletion(fileId);
+      // Log deletion request (security-critical action)
+      await securityLogger.log({
+        action: 'requestFileDeletion',
+        username: currentUsername,
+        fileId: fileId,
+        fileName: decryptedFilename,
+        timestamp: new Date().toISOString()
+      });
+      alert('Deletion request submitted');
+      window.location.reload();
+    } catch (error) {
+      alert(`Failed to request deletion: ${error.message}`);
+      await standardLogger.logMessage(`Failed deletion request for file ${fileId}: ${error.message}`, 'error');
+    }
+  };
+
+  // Show error
+  function showError(message) {
+    document.getElementById('loadingState').classList.add('d-none');
+    document.getElementById('errorState').textContent = message;
+    document.getElementById('errorState').classList.remove('d-none');
+  }
+
+  // Get CSRF token from cookies
+  function getCookie(name) {
+    let cookieValue = null;
+    if (document.cookie && document.cookie !== '') {
+      const cookies = document.cookie.split(';');
+      for (let i = 0; i < cookies.length; i++) {
+        const cookie = cookies[i].trim();
+        if (cookie.substring(0, name.length + 1) === (name + '=')) {
+          cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+          break;
+        }
+      }
+    }
+    return cookieValue;
+  }
+
+  // Initialize when DOM is ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+
+})();
+</script>
+{% endblock %}

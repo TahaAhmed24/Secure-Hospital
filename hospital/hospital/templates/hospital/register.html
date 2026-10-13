@@ -1,0 +1,476 @@
+{% extends "base.html" %}
+{% block title %}Register{% endblock %}
+{% block content %}
+<style>
+
+@keyframes slideUp {
+    from {
+        opacity: 0;
+        transform: translateY(30px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.register-header {
+    background: linear-gradient(135deg, #4A90E2 0%, #0066CC 100%);
+    color: white;
+    padding: 2rem;
+    text-align: center;
+    border: none;
+}
+
+.register-header h4 {
+    margin: 0;
+    font-size: 1.75rem;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+
+.register-header p {
+    margin: 0.5rem 0 0 0;
+    opacity: 0.95;
+    font-size: 0.9rem;
+}
+
+.register-body {
+    padding: 2rem;
+    background: white;
+}
+
+.form-label {
+    font-weight: 600;
+    color: #333;
+    margin-bottom: 0.5rem;
+    font-size: 0.9rem;
+}
+
+.form-control {
+    border: 2px solid #e0e0e0;
+    border-radius: 8px;
+    transition: all 0.3s ease;
+    padding: 0.75rem 1rem;
+}
+
+.form-control:focus {
+    border-color: #4A90E2;
+    box-shadow: 0 0 0 0.2rem rgba(74, 144, 226, 0.15);
+    outline: none;
+}
+
+.form-control::placeholder {
+    color: #999;
+}
+
+.security-key-section {
+    background: #f8f9fa;
+    border-radius: 8px;
+    padding: 1.25rem;
+    margin-bottom: 1.5rem;
+    border: 2px dashed #dee2e6;
+    transition: all 0.3s ease;
+}
+
+.security-key-section:hover {
+    border-color: #4A90E2;
+    background: #f0f7ff;
+}
+
+
+.btn-register {
+    width: 100%;
+    padding: 0.875rem;
+    font-size: 1rem;
+    font-weight: 600;
+    border-radius: 8px;
+    border: none;
+    background: linear-gradient(135deg, #4A90E2 0%, #0066CC 100%);
+    color: white;
+    transition: all 0.3s ease;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    box-shadow: 0 4px 15px rgba(74, 144, 226, 0.4);
+}
+
+.password-requirements {
+    background: #f0f7ff;
+    padding: 1rem;
+    border-radius: 8px;
+    border-left: 4px solid #4A90E2;
+}
+
+.requirement {
+    display: flex;
+    align-items: center;
+    color: #6c757d;
+    margin-bottom: 0.4rem;
+    transition: all 0.3s ease;
+    font-size: 0.875rem;
+}
+
+.requirement:last-child {
+    margin-bottom: 0;
+}
+
+.requirement.met {
+    color: #28a745;
+}
+
+.requirement.met .req-icon {
+    background-color: #28a745;
+    border-color: #28a745;
+}
+
+.req-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    margin-right: 0.5rem;
+    font-weight: bold;
+    font-size: 0.7rem;
+    background-color: #e9ecef;
+    color: transparent;
+    border: 2px solid #dee2e6;
+    flex-shrink: 0;
+    transition: all 0.3s ease;
+}
+
+.requirement.met .req-icon::before {
+    content: "✓";
+    color: white;
+}
+
+.req-icon::before {
+    content: "";
+}
+
+.error-message {
+    background-color: #f8d7da;
+    border: 1px solid #f5c2c7;
+    border-radius: 8px;
+    color: #842029;
+    padding: 1rem;
+    margin-bottom: 1rem;
+    display: none;
+    animation: shake 0.5s;
+}
+
+.error-message.show {
+    display: block;
+}
+
+@keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    25% { transform: translateX(-10px); }
+    75% { transform: translateX(10px); }
+}
+
+.error-message strong {
+    display: block;
+    margin-bottom: 0.5rem;
+}
+
+.error-message ul {
+    margin: 0;
+    padding-left: 1.5rem;
+}
+
+.error-message li {
+    margin-bottom: 0.25rem;
+}
+</style>
+
+<div class="register-container">
+    <div class="register-card card">
+        <div class="register-header">
+            <h4>Create Account</h4>
+        </div>
+        <div class="register-body">
+            <div id="error-container" class="error-message">
+                <strong>Please fix the following errors:</strong>
+                <ul id="error-list"></ul>
+            </div>
+
+            <form method="post" action="{% url 'register' %}">
+                {% csrf_token %}
+
+                <div class="mb-3">
+                    <label for="id_username" class="form-label">Username</label>
+                    <input type="text" name="username" id="id_username" class="form-control" placeholder="Enter your username" required>
+                </div>
+
+                <div class="mb-3">
+                    <label for="{{ form.role.id_for_label }}" class="form-label">{{ form.role.label }}</label>
+                    {{ form.role }}
+                </div>
+
+                <div class="security-key-section mt-3">
+                    <label for="device-name">Security Key Name</label>
+                    <input 
+                        type="text" 
+                        id="device-name" 
+                        class="form-control" 
+                        placeholder="e.g., My YubiKey, Touch ID">
+                    <small class="text-muted d-block mt-2">Give your security key a memorable name</small>
+                </div>
+                
+                <button id="register-btn" type="button" class="btn btn-register">
+                    Create Account
+                </button>
+            </form>
+        </div>
+    </div>
+</div>
+
+<script>
+
+function validateForm() {
+    const errors = [];
+    const username = document.getElementById("id_username").value.trim();
+    const role = document.getElementById("id_role").value;
+
+    // Check if fields are filled
+    if (!username) {
+        errors.push("Username is required");
+    }
+
+    return errors;
+}
+
+function showErrors(errors) {
+    const errorContainer = document.getElementById("error-container");
+    const errorList = document.getElementById("error-list");
+    
+    errorList.innerHTML = "";
+    errors.forEach(error => {
+        const li = document.createElement("li");
+        li.textContent = error;
+        errorList.appendChild(li);
+    });
+    
+    errorContainer.classList.add("show");
+    errorContainer.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function hideErrors() {
+    const errorContainer = document.getElementById("error-container");
+    errorContainer.classList.remove("show");
+}
+
+// Registration function
+async function register_user() {
+    // Validate form first
+    const errors = validateForm();
+    
+    if (errors.length > 0) {
+        showErrors(errors);
+        return;
+    }
+    
+    // Hide errors if validation passes
+    hideErrors();
+    
+    const username = document.getElementById("id_username").value;
+    const role = document.getElementById("id_role").value;
+
+    try {
+        // Step 1: fetch WebAuthn challenge for this username with get
+        const queryParams = new URLSearchParams({
+            username: username,
+            role: role
+        });
+
+        let res = await fetch(
+            "{% url 'webauth:registration' %}?" + queryParams.toString()
+        );
+        const args = await res.json();
+        if(!res.ok) {
+            throw new Error(args.error || "Failed to get registration challenge");
+        }
+        
+        // Convert base64url fields to ArrayBuffer
+        args.publicKey.user.id = base64url_to_buffer(args.publicKey.user.id);
+        args.publicKey.challenge = base64url_to_buffer(args.publicKey.challenge);
+        
+        // Step 2: create credential
+        const credential = await navigator.credentials.create(args);
+
+        // Step 3: send to server to finalize registration
+        const data = {
+            name: document.getElementById("device-name").value || "My Security Key",
+            pubKeyCredential: {
+                id: credential.id,
+                rawId: buffer_to_base64url(credential.rawId),
+                response: {
+                    attestationObject: buffer_to_base64url(credential.response.attestationObject),
+                    clientDataJSON: buffer_to_base64url(credential.response.clientDataJSON),
+                },
+                type: credential.type,
+            },
+        };
+        // Actually create the credentials on the device and store the public element on the server
+        res = await fetch("{% url 'webauth:registration' %}", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "X-CSRFToken": getCookie("csrftoken"),
+            },
+            body: JSON.stringify(data),
+        });
+        const result = await res.json();
+        if (result.certificate) {
+            showCertificateModal(result.certificate_password, result.certificate, username);
+        } else {
+            //alert("User registered successfully!");
+            //window.location.href = "{% url 'login' %}";
+            window.location.href = "{% url 'login' %}?next={% url 'setup_keys' %}";
+        }
+    } catch (error) {
+        showErrors(["Registration failed: " + error.message]);
+    }
+}
+
+document.getElementById("register-btn").addEventListener("click", register_user);
+
+
+// Function to show certificate password modal
+function showCertificateModal(password, certificateData, username) {
+    // Create modal HTML
+    const modalHTML = `
+        <div id="cert-modal" style="
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 9999;
+        ">
+            <div style="
+                background: white;
+                padding: 2rem;
+                border-radius: 8px;
+                max-width: 400px;
+                width: 90%;
+            ">
+                <h3>Certificate Generated</h3>
+                
+                <p><strong>Save this password - it will only be shown once:</strong></p>
+                
+                <div style="margin: 1rem 0;">
+                    <input 
+                        type="text" 
+                        id="cert-password-display" 
+                        value="${password}" 
+                        readonly
+                        style="
+                            width: 100%;
+                            padding: 0.5rem;
+                            font-family: monospace;
+                            margin-bottom: 0.5rem;
+                        "
+                    >
+                    <button onclick="copyCertPassword()" style="width: 100%; padding: 0.5rem;">
+                        Copy Password
+                    </button>
+                </div>
+                
+                <button 
+                    onclick="downloadCertificate('${certificateData}', '${username}')"
+                    style="width: 100%; padding: 0.75rem; margin-bottom: 0.5rem;"
+                >
+                    Download Certificate
+                </button>
+                
+                <button 
+                    onclick="closeModalAndRedirect()"
+                    style="width: 100%; padding: 0.75rem;"
+                >
+                    Continue to Login
+                </button>
+            </div>
+        </div>
+    `;
+    
+    document.body.insertAdjacentHTML('beforeend', modalHTML);
+}
+
+// Copy password to clipboard
+function copyCertPassword() {
+    const passwordInput = document.getElementById('cert-password-display');
+    passwordInput.select();
+    document.execCommand('copy');
+    
+    // Show feedback
+    const btn = event.target;
+    const originalText = btn.textContent;
+    btn.textContent = '✓ Copied!';
+    btn.style.background = '#28a745';
+    
+    setTimeout(() => {
+        btn.textContent = originalText;
+        btn.style.background = '#4A90E2';
+    }, 2000);
+}
+
+// Download certificate
+function downloadCertificate(certificateData, username) {
+    const base64 = certificateData.replace(/-/g, '+').replace(/_/g, '/');
+    const p12_bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+    
+    const blob = new Blob([p12_bytes], { type: "application/x-pkcs12" });
+    const url = URL.createObjectURL(blob);
+    
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = username + "_doctor_certificate.p12";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    
+    // Change button text
+    event.target.textContent = '✓ Certificate Downloaded';
+    event.target.style.background = '#28a745';
+}
+
+// Close modal and redirect
+// Close modal and redirect
+function closeModalAndRedirect() {
+    document.getElementById('cert-modal').remove();
+    window.location.href = "{% url 'login' %}?next={% url 'setup_keys' %}";
+}
+
+// Helper functions
+function base64url_to_buffer(base64url) {
+    const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes.buffer;
+}
+
+function buffer_to_base64url(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+
+function getCookie(name) {
+    const cookies = document.cookie.split(';').map(c => c.trim());
+    for (const cookie of cookies) {
+        if (cookie.startsWith(name + '=')) return decodeURIComponent(cookie.slice(name.length + 1));
+    }
+    return null;
+}
+</script>
+{% endblock %}

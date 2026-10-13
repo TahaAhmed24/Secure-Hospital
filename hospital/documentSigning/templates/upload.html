@@ -1,0 +1,354 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}Upload Files{% endblock %}
+
+{% block content %}
+<script src="{% static 'crypto.js' %}"></script>
+<script src="{% static 'fileOperations.js' %}"></script>
+<script src="{% static 'session.js' %}"></script>
+<style>
+.modal {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.5);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+.hidden {
+    display: none;
+}
+.modal-content {
+    background: white;
+    padding: 20px;
+    border-radius: 8px;
+    width: 400px;
+}
+.modal-buttons {
+    margin-top: 15px;
+    text-align: right;
+}
+.modal-buttons button {
+    margin-left: 10px;
+}
+</style>
+<h1>Upload Encrypted File</h1>
+<input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
+
+<!-- Session Status -->
+<div id="session-status">
+    Session: <span id="status">Locked</span>
+    <button onclick="showUnlockModal()">Unlock</button>
+    <button onclick="lockSession()">Lock</button>
+    <button onclick="showSetupModal()">Setup Keys</button>
+</div>
+
+<!-- Setup Keys Modal -->
+<div id="setup-modal" style="display:none;">
+    <h2>Setup Encryption Keys</h2>
+    <p>This is required only once.</p>
+    <button type="button" onclick="setupKeys()">Generate Keys</button>
+    <p id="generated-password" style="font-weight:bold; color:green;"></p>
+
+    <p id="setup-error" style="color:red;"></p>
+</div>
+
+<!-- Unlock Modal -->
+<div id="unlock-modal" style="display:none;">
+    <h2>Unlock Session</h2>
+    <input type="password" id="unlock-password" placeholder="Your Password">
+    <button onclick="unlockSession()">Unlock</button>
+    <p id="unlock-error" style="color:red;"></p>
+</div>
+
+<!-- Upload Form -->
+<div id="upload-form">
+    <input type="file" id="file-input">
+
+    <div id="recipients">
+        <h3>Share with:</h3>
+        <div id="user-list"></div>
+    </div>
+
+    <button onclick="uploadFile()">Upload & Encrypt</button>
+    <div id="progress"></div>
+</div>
+
+<!-- File List -->
+<div id="file-list">
+    <h2>Your Files</h2>
+    <ul id="files"></ul>
+</div>
+<div id="share-modal" class="modal hidden">
+    <div class="modal-content">
+        <h3>Select users to share with</h3>
+
+        <div id="modal-user-list"></div>
+
+        <div class="modal-buttons">
+            <button id="share-cancel">Cancel</button>
+            <button id="share-confirm">Share</button>
+        </div>
+    </div>
+</div>
+
+    <script>
+        // Django variable
+        window.currentUserId = {{ user.id }};
+
+        // generate password
+        function generateSecurePassword(length = 32) {
+            const array = new Uint8Array(length);
+            crypto.getRandomValues(array);
+            return btoa(String.fromCharCode(...array));  // Base64 strong password
+        }
+
+        // ----------------------------
+        // Modal controls
+        // ----------------------------
+        function showUnlockModal() {
+            document.getElementById('unlock-modal').style.display = 'block';
+        }
+
+        function showSetupModal() {
+            document.getElementById('setup-modal').style.display = 'block';
+        }
+
+        // ----------------------------
+        // Setup Keys
+        // ----------------------------
+        async function setupKeys(event) {
+            if (event) event.preventDefault();
+
+            const errorEl = document.getElementById('setup-error');
+            const outputEl = document.getElementById('generated-password');
+
+            try {
+                const generatedPassword = generateSecurePassword();
+
+                await session.setupKeys(generatedPassword);
+
+                outputEl.textContent = "Save this password: " + generatedPassword;
+
+                alert("Keys successfully created! Save the password shown below.");
+
+                // DO NOT close the modal yet!
+
+            } catch (error) {
+                errorEl.textContent = error.message;
+            }
+        }
+
+
+
+        // ----------------------------
+        // Unlock
+        // ----------------------------
+        async function unlockSession() {
+            const password = document.getElementById('unlock-password').value;
+            const errorEl = document.getElementById('unlock-error');
+
+            try {
+                await session.unlockSession(password);
+                document.getElementById('status').textContent = 'Unlocked';
+                document.getElementById('unlock-modal').style.display = 'none';
+                await loadFiles();
+                await loadUsers();
+            } catch (error) {
+                errorEl.textContent = error.message;
+            }
+        }
+
+        // ----------------------------
+        // Lock
+        // ----------------------------
+        function lockSession() {
+            session.lockSession();
+            document.getElementById('status').textContent = 'Locked';
+            document.getElementById('files').innerHTML = '';
+        }
+
+        // ----------------------------
+        // Load Users
+        // ----------------------------
+        async function loadUsers() {
+            const response = await fetch('/records/api/users/');
+            const data = await response.json();
+
+            const userList = document.getElementById('user-list');
+            userList.innerHTML = '';
+            console.log(data);
+            for (const user of data.users) {
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.value = user.id;
+                checkbox.id = `user-${user.id}`;
+
+                const label = document.createElement('label');
+                label.htmlFor = `user-${user.id}`;
+                label.textContent = `${user.first_name} ${user.last_name} (${user.username})`;
+
+                const div = document.createElement('div');
+                div.appendChild(checkbox);
+                div.appendChild(label);
+
+                userList.appendChild(div);
+            }
+        }
+
+        // ----------------------------
+        // Upload File
+        // ----------------------------
+        async function uploadFile() {
+            if (!session.isUnlocked) {
+                alert('Please unlock session first');
+                return;
+            }
+
+            const fileInput = document.getElementById('file-input');
+            const file = fileInput.files[0];
+
+            if (!file) {
+                alert('Please select a file');
+                return;
+            }
+
+            const checkboxes = document.querySelectorAll('#user-list input:checked');
+            const recipientIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
+
+            const progress = document.getElementById('progress');
+            progress.textContent = 'Encrypting and uploading...';
+
+            try {
+                await FileOperations.uploadFile(file, recipientIds);
+                progress.textContent = 'Upload successful!';
+                fileInput.value = '';
+                await loadFiles();
+            } catch (error) {
+                progress.textContent = `Error: ${error.message}`;
+            }
+        }
+
+        // ----------------------------
+        // Load Files
+        // ----------------------------
+        async function loadFiles() {
+            const files = await FileOperations.listFiles();
+            const fileList = document.getElementById('files');
+            fileList.innerHTML = '';
+            for (const file of files) {
+                const li = document.createElement('li');
+                li.innerHTML = `
+                    <strong>${file.filename}</strong>
+                    (${(file.file_size / 1024).toFixed(2)} KB)
+                    <button onclick="downloadFile(${file.id}, '${file.encrypted_symmetric_key}', '${file.filename}')">Download</button>
+                    <button onclick="shareFile(${file.id}, '${file.encrypted_symmetric_key}')">Share</button>
+                `;
+                fileList.appendChild(li);
+            }
+        }
+
+        // ----------------------------
+        // Download File
+        // ----------------------------
+        async function downloadFile(fileId, encryptedKey, filename) {
+            try {
+                const decryptedData = await FileOperations.downloadFile(fileId, encryptedKey);
+
+                const blob = new Blob([decryptedData]);
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                a.click();
+                URL.revokeObjectURL(url);
+            } catch (error) {
+                alert(`Download failed: ${error.message}`);
+            }
+        }
+
+        // ----------------------------
+        // Share File
+        // ----------------------------
+        let pendingShareFileId = null;
+        let pendingEncryptedKey = null;
+        async function shareFile(fileId, encryptedKey) {
+            if (!session.isUnlocked) {
+                alert('Please unlock session first');
+                return;
+            }
+
+            pendingShareFileId = fileId;
+            pendingEncryptedKey = encryptedKey;
+
+            document.getElementById('share-modal').classList.remove('hidden');
+
+            // Now load users + precheck existing shares
+            await loadUsersInModal(fileId);
+        }
+
+        async function loadUsersInModal(fileId) {
+            // Load all users
+            const respUsers = await fetch('/records/api/users/');
+            const dataUsers = await respUsers.json();
+
+            // Load users who already have access
+            const respAccess = await fetch(`/records/api/files/${fileId}/access/`);
+            const dataAccess = await respAccess.json();
+            const sharedUserIds = new Set(dataAccess.users);
+
+            const container = document.getElementById('modal-user-list');
+            container.innerHTML = '';
+
+            for (const user of dataUsers.users) {
+
+                const isChecked = sharedUserIds.has(user.id) ? 'checked' : '';
+
+                const div = document.createElement('div');
+                div.innerHTML = `
+                    <input type="checkbox" value="${user.id}" id="modal-user-${user.id}" ${isChecked}>
+                    <label for="modal-user-${user.id}">
+                        ${user.first_name} ${user.last_name} (${user.username})
+                    </label>
+                `;
+
+                container.appendChild(div);
+            }
+        }
+        document.getElementById('share-cancel').onclick = () => {
+            document.getElementById('share-modal').classList.add('hidden');
+        };
+        document.getElementById('share-confirm').onclick = async () => {
+
+            const checkboxes = document.querySelectorAll('#modal-user-list input[type="checkbox"]:checked');
+            const recipientIds = [...checkboxes].map(cb => parseInt(cb.value));
+
+            if (recipientIds.length === 0) {
+                alert('Please select at least one user.');
+                return;
+            }
+
+            try {
+                await FileOperations.shareFile(
+                    pendingShareFileId,
+                    pendingEncryptedKey,
+                    recipientIds
+                );
+
+                alert('File shared successfully');
+            } catch (e) {
+                alert('Share failed: ' + e.message);
+            }
+
+            // Close modal
+            document.getElementById('share-modal').classList.add('hidden');
+        };
+
+        // On load
+        if (session.isUnlocked) {
+            loadFiles();
+            loadUsers();
+        }
+    </script>
+{% endblock %}

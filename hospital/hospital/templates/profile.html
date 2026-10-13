@@ -1,0 +1,365 @@
+{% extends "base.html" %}
+{% load static %}
+{% load form_extras %}
+{% block title %}Profile{% endblock %}
+{% block content %}
+
+<script src="{% static 'crypto.js' %}"></script>
+<script src="{% static 'session.js' %}"></script>
+
+<style>
+@keyframes slideUp {
+    from { opacity: 0; transform: translateY(30px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.profile-card {
+    animation: slideUp 0.6s ease-out;
+    max-width: 800px;
+    margin: auto;
+    border: none;
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 6px 25px rgba(0,0,0,0.1);
+}
+
+.profile-header {
+    background: linear-gradient(135deg, #4A90E2 0%, #0066CC 100%);
+    padding: 2rem;
+    color: white;
+    text-align: center;
+}
+
+.profile-header h4 {
+    margin: 0;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+
+.profile-header p {
+    opacity: 0.9;
+    margin-top: 0.5rem;
+}
+
+.profile-body {
+    padding: 2rem;
+    background: white;
+}
+
+.form-label {
+    font-weight: 600;
+    color: #333;
+    margin-bottom: 0.4rem;
+}
+
+.form-control,
+.form-select {
+    border: 2px solid #e0e0e0;
+    border-radius: 8px;
+    padding: 0.75rem;
+    transition: 0.2s ease;
+}
+
+.form-control:focus,
+.form-select:focus {
+    border-color: #4A90E2;
+    box-shadow: 0 0 0 0.15rem rgba(74,144,226,0.2);
+}
+
+.btn-save {
+    width: 100%;
+    padding: 0.85rem;
+    border-radius: 10px;
+    border: none;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    background: linear-gradient(135deg, #4A90E2 0%, #0066CC 100%);
+    color: white;
+    box-shadow: 0 4px 15px rgba(74,144,226,0.4);
+    transition: all 0.3s ease;
+}
+.btn-save:hover {
+    opacity: 0.95;
+    transform: translateY(-2px);
+}
+
+.alert {
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+}
+</style>
+
+<div class="profile-card card">
+    <!-- HEADER -->
+    <div class="profile-header">
+        <h4>Your Profile</h4>
+        <p>Update your personal details below</p>
+    </div>
+
+    <!-- BODY -->
+    <div class="profile-body">
+        <!-- Session Loading (for patients) -->
+        <div id="session-loading" class="alert alert-info d-none">
+            <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+            Loading your encryption keys...
+        </div>
+
+        <div id="session-error" class="alert alert-danger d-none">
+            Failed to load encryption keys. Please try refreshing the page.
+        </div>
+
+        <!-- Success/Error Messages -->
+        <div id="success-message" class="alert alert-success d-none"></div>
+        <div id="error-message" class="alert alert-danger d-none"></div>
+
+        <!-- CURRENT INFO -->
+        <div class="mb-4">
+            <h5 class="fw-bold mb-3">Account Details</h5>
+            <p><strong>Username:</strong> {{ user.username }}</p>
+        </div>
+
+        <!-- FORM -->
+        <form id="profile-form">
+            {% csrf_token %}
+
+            <div class="mb-3">
+                <label class="form-label" for="first_name">First Name</label>
+                <input type="text" class="form-control" id="first_name" name="first_name" placeholder="John" required>
+            </div>
+
+            <div class="mb-3">
+                <label class="form-label" for="last_name">Last Name</label>
+                <input type="text" class="form-control" id="last_name" name="last_name" placeholder="Doe" required>
+            </div>
+
+            {% if request.session.role == 'patient' %}
+            <div class="mb-3">
+                <label class="form-label" for="date_of_birth">Date of Birth</label>
+                <input type="date" class="form-control" id="date_of_birth" name="date_of_birth">
+            </div>
+            {% endif %}
+
+            {% if request.session.role == 'doctor' %}
+            <div class="mb-3">
+                <label class="form-label" for="medical_organisation">Medical Organisation</label>
+                <input type="text" class="form-control" id="medical_organisation" name="medical_organisation" required>
+            </div>
+            {% endif %}
+
+            <button type="submit" class="btn-save">Save Changes</button>
+        </form>
+    </div>
+</div>
+
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+    const userRole = '{{ request.session.role }}';
+    const isPatient = userRole === 'patient';
+    const currentUsername = '{{ user.username }}';
+
+    /**
+     * Initialize the page
+     */
+    async function init() {
+        try {
+            if (isPatient) {
+                // Show loading indicator
+                document.getElementById('session-loading').classList.remove('d-none');
+
+                // Unlock session from device to get encryption keys
+                await session.autoUnlockFromDevice();
+
+                // Hide loading
+                document.getElementById('session-loading').classList.add('d-none');
+
+                // Load encrypted profile data
+                await loadProfileData();
+            } else {
+                // For doctors, just load plaintext data
+                await loadProfileData();
+            }
+        } catch (error) {
+            console.error('Initialization failed:', error);
+            if (isPatient) {
+                document.getElementById('session-loading').classList.add('d-none');
+                document.getElementById('session-error').classList.remove('d-none');
+            }
+        }
+    }
+
+    /**
+     * Load profile data from server
+     */
+    async function loadProfileData() {
+        try {
+            const response = await fetch('/appointments/api/profile/');
+            const data = await response.json();
+
+            if (data.error) {
+                throw new Error(data.error);
+            }
+
+            if (data.role === 'patient') {
+                // Decrypt patient data with private key
+                if (data.first_name) {
+                    const encryptedBytes = Uint8Array.from(atob(data.first_name), c => c.charCodeAt(0));
+                    const decryptedBytes = await window.crypto.subtle.decrypt(
+                        { name: "RSA-OAEP" },
+                        session.getEncryptionPrivateKey(),
+                        encryptedBytes
+                    );
+                    const firstName = new TextDecoder().decode(decryptedBytes);
+                    document.getElementById('first_name').value = firstName;
+                }
+
+                if (data.last_name) {
+                    const encryptedBytes = Uint8Array.from(atob(data.last_name), c => c.charCodeAt(0));
+                    const decryptedBytes = await window.crypto.subtle.decrypt(
+                        { name: "RSA-OAEP" },
+                        session.getEncryptionPrivateKey(),
+                        encryptedBytes
+                    );
+                    const lastName = new TextDecoder().decode(decryptedBytes);
+                    document.getElementById('last_name').value = lastName;
+                }
+
+                if (data.date_of_birth) {
+                    const encryptedBytes = Uint8Array.from(atob(data.date_of_birth), c => c.charCodeAt(0));
+                    const decryptedBytes = await window.crypto.subtle.decrypt(
+                        { name: "RSA-OAEP" },
+                        session.getEncryptionPrivateKey(),
+                        encryptedBytes
+                    );
+                    const dob = new TextDecoder().decode(decryptedBytes);
+                    document.getElementById('date_of_birth').value = dob;
+                }
+            } else {
+                // Doctor data (plaintext)
+                document.getElementById('first_name').value = data.first_name || '';
+                document.getElementById('last_name').value = data.last_name || '';
+                if (data.medical_organisation) {
+                    document.getElementById('medical_organisation').value = data.medical_organisation;
+                }
+            }
+        } catch (error) {
+            console.error('Failed to load profile:', error);
+            showError('Failed to load profile data');
+        }
+    }
+
+    /**
+     * Handle form submission
+     */
+    document.getElementById('profile-form').addEventListener('submit', async function(e) {
+        e.preventDefault();
+
+        try {
+            const formData = {};
+
+            if (isPatient) {
+                // Encrypt patient data with public key before sending
+                const firstName = document.getElementById('first_name').value;
+                const lastName = document.getElementById('last_name').value;
+                const dob = document.getElementById('date_of_birth').value;
+
+                // Encrypt first name
+                const firstNameBytes = new TextEncoder().encode(firstName);
+                const encryptedFirstName = await window.crypto.subtle.encrypt(
+                    { name: "RSA-OAEP" },
+                    session.getEncryptionPublicKey(),
+                    firstNameBytes
+                );
+                formData.first_name = btoa(String.fromCharCode(...new Uint8Array(encryptedFirstName)));
+
+                // Encrypt last name
+                const lastNameBytes = new TextEncoder().encode(lastName);
+                const encryptedLastName = await window.crypto.subtle.encrypt(
+                    { name: "RSA-OAEP" },
+                    session.getEncryptionPublicKey(),
+                    lastNameBytes
+                );
+                formData.last_name = btoa(String.fromCharCode(...new Uint8Array(encryptedLastName)));
+
+                // Encrypt date of birth if provided
+                if (dob) {
+                    const dobBytes = new TextEncoder().encode(dob);
+                    const encryptedDob = await window.crypto.subtle.encrypt(
+                        { name: "RSA-OAEP" },
+                        session.getEncryptionPublicKey(),
+                        dobBytes
+                    );
+                    formData.date_of_birth = btoa(String.fromCharCode(...new Uint8Array(encryptedDob)));
+                }
+            } else {
+                // Doctor data (plaintext)
+                formData.first_name = document.getElementById('first_name').value;
+                formData.last_name = document.getElementById('last_name').value;
+                formData.medical_organisation = document.getElementById('medical_organisation').value;
+            }
+
+            // Send to server with security logging
+            const response = await window.loggedFetch('/appointments/api/profile/update/', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCsrfToken()
+                },
+                body: JSON.stringify(formData)
+            }, {
+                logger: window.securityLogger,
+                action: 'updateProfile',
+                username: currentUsername,
+                data: {
+                    role: userRole,
+                    fieldsUpdated: Object.keys(formData)
+                },
+                logOnSuccess: true,
+                logOnError: true
+            });
+
+            const result = await response.json();
+
+            if (!response.ok || result.error) {
+                throw new Error(result.error || 'Failed to update profile');
+            }
+
+            showSuccess('Profile updated successfully!');
+        } catch (error) {
+            console.error('Failed to save profile:', error);
+            showError('Failed to save profile: ' + error.message);
+        }
+    });
+
+    /**
+     * Show success message
+     */
+    function showSuccess(message) {
+        const successEl = document.getElementById('success-message');
+        successEl.textContent = message;
+        successEl.classList.remove('d-none');
+        setTimeout(() => successEl.classList.add('d-none'), 3000);
+    }
+
+    /**
+     * Show error message
+     */
+    function showError(message) {
+        const errorEl = document.getElementById('error-message');
+        errorEl.textContent = message;
+        errorEl.classList.remove('d-none');
+    }
+
+    /**
+     * Get CSRF token
+     */
+    function getCsrfToken() {
+        return document.querySelector('[name=csrfmiddlewaretoken]').value;
+    }
+
+    // Initialize on page load
+    init();
+});
+</script>
+{% endblock %}
